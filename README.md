@@ -23,6 +23,8 @@ A fast Rust statusline for [Claude Code](https://claude.com/claude-code). Render
 
 ## Install
 
+### Quick install (recommended)
+
 One-line install:
 
 ```bash
@@ -37,11 +39,47 @@ Or, from a local clone:
 
 Either way, the script runs `cargo install` (from the local checkout when present, otherwise from the git repo via `cargo install --git`), then patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline. Restart Claude Code afterwards. The installer backs up your existing `settings.json` to `settings.json.bak.YYYYMMDD-HHMMSS`.
 
-If you'd rather wire it up by hand: `cargo install --path .` and then add to `settings.json`:
+### Manual install with `cargo`
+
+If you'd rather skip the script and wire things up yourself:
+
+**1. Build and install the binary** — pick one:
+
+```bash
+# From a local clone:
+cargo install --path . --locked
+
+# Or straight from the git repo (no clone needed):
+cargo install --git https://github.com/tom-ha/ccbox.git --locked ccbox
+```
+
+`cargo install` drops the binary into `$CARGO_HOME/bin` (defaults to `~/.cargo/bin`).
+
+**2. Confirm where the binary landed:**
+
+```bash
+command -v ccbox
+# → /Users/you/.cargo/bin/ccbox
+```
+
+If that prints nothing, make sure `~/.cargo/bin` is on your `PATH` (rustup adds it to your shell rc by default).
+
+**3. Point Claude Code at it** by editing `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json` if you've set that) and adding a `statusLine` entry. Use the **absolute** path from step 2 — Claude Code does not expand `~` or rely on your interactive shell's `PATH`:
 
 ```json
-{ "statusLine": { "type": "command", "command": "/path/to/ccbox" } }
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/Users/you/.cargo/bin/ccbox"
+  }
+}
 ```
+
+If `settings.json` already exists, merge the `statusLine` key into the existing object rather than overwriting the file.
+
+**4. Restart Claude Code** so it picks up the new statusline.
+
+To upgrade later, re-run the same `cargo install …` command — no `settings.json` changes needed as long as the binary path doesn't move.
 
 ## Configuration
 
