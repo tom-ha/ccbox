@@ -25,31 +25,19 @@ A fast Rust statusline for [Claude Code](https://claude.com/claude-code). Render
 
 ### Quick install (recommended)
 
-One-line install:
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tom-ha/ccbox/main/install.sh | bash
 ```
 
-Or, from a local clone:
-
-```bash
-./install.sh
-```
-
-Either way, the script runs `cargo install` (from the local checkout when present, otherwise from the git repo via `cargo install --git`), then patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline. Restart Claude Code afterwards. The installer backs up your existing `settings.json` to `settings.json.bak.YYYYMMDD-HHMMSS`.
+The script runs `cargo install --git` to build and install the binary, then patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline. Restart Claude Code afterwards. The installer backs up your existing `settings.json` to `settings.json.bak.YYYYMMDD-HHMMSS`.
 
 ### Manual install with `cargo`
 
 If you'd rather skip the script and wire things up yourself:
 
-**1. Build and install the binary** — pick one:
+**1. Build and install the binary:**
 
 ```bash
-# From a local clone:
-cargo install --path . --locked
-
-# Or straight from the git repo (no clone needed):
 cargo install --git https://github.com/tom-ha/ccbox.git --locked ccbox
 ```
 
