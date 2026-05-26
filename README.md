@@ -14,7 +14,22 @@ A fast Rust statusline for [Claude Code](https://claude.com/claude-code). Render
 ╰─────────────────────────────────────────────────────────────────────────────╯
 ```
 
+## Prerequisites
+
+- **Rust toolchain** (`cargo`) — install via [rustup](https://rustup.rs): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+- **Python 3** — used by `install.sh` to patch `~/.claude/settings.json`
+- **[Claude Code](https://claude.com/claude-code)** — the statusline host
+- A Nerd Font in your terminal — the box uses Nerd Font glyphs (folder, branch, model icons, etc.) and will render as tofu without one
+
 ## Install
+
+One-line install (clones the repo, builds, and wires up `settings.json`):
+
+```bash
+git clone https://github.com/tom-ha/ccbox.git && cd ccbox && ./install.sh
+```
+
+Or, from an existing clone:
 
 ```bash
 ./install.sh
