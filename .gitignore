@@ -1,0 +1,13 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# Editors / IDEs
+.vscode/
+.idea/
+
+# Claude Code per-user settings (keep commands/skills tracked)
+.claude/settings.local.json
