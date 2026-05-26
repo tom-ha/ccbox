@@ -3,8 +3,21 @@ set -euo pipefail
 
 # Build & install ccbox, then wire it into Claude Code's statusLine.
 # Requires: cargo (https://rustup.rs) and python3.
+#
+# Works two ways:
+#   - From a local clone:  ./install.sh         (installs from $SCRIPT_DIR)
+#   - Piped from curl:     curl ... | bash      (installs from the git repo)
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CCBOX_GIT_URL="${CCBOX_GIT_URL:-https://github.com/tom-ha/ccbox.git}"
+
+# When piped via `curl | bash`, BASH_SOURCE[0] is unset/empty. Fall back to
+# an empty SCRIPT_DIR in that case so the local-checkout detection below fails
+# cleanly and we install from git instead.
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+else
+  SCRIPT_DIR=""
+fi
 
 err() { printf 'error: %s\n' "$*" >&2; }
 
@@ -20,8 +33,14 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "==> cargo install --path $SCRIPT_DIR"
-cargo install --path "$SCRIPT_DIR" --locked
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/Cargo.toml" ]] \
+  && grep -q '^name\s*=\s*"ccbox"' "$SCRIPT_DIR/Cargo.toml"; then
+  echo "==> cargo install --path $SCRIPT_DIR"
+  cargo install --path "$SCRIPT_DIR" --locked
+else
+  echo "==> cargo install --git $CCBOX_GIT_URL"
+  cargo install --git "$CCBOX_GIT_URL" --locked ccbox
+fi
 
 CCBOX_BIN="$(command -v ccbox || true)"
 if [[ -z "$CCBOX_BIN" ]]; then

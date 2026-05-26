@@ -23,19 +23,19 @@ A fast Rust statusline for [Claude Code](https://claude.com/claude-code). Render
 
 ## Install
 
-One-line install (clones the repo, builds, and wires up `settings.json`):
+One-line install:
 
 ```bash
-git clone https://github.com/tom-ha/ccbox.git && cd ccbox && ./install.sh
+curl -fsSL https://raw.githubusercontent.com/tom-ha/ccbox/main/install.sh | bash
 ```
 
-Or, from an existing clone:
+Or, from a local clone:
 
 ```bash
 ./install.sh
 ```
 
-This runs `cargo install --path .`, then patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline. Restart Claude Code afterwards. The installer backs up your existing `settings.json` to `settings.json.bak.YYYYMMDD-HHMMSS`.
+Either way, the script runs `cargo install` (from the local checkout when present, otherwise from the git repo via `cargo install --git`), then patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline. Restart Claude Code afterwards. The installer backs up your existing `settings.json` to `settings.json.bak.YYYYMMDD-HHMMSS`.
 
 If you'd rather wire it up by hand: `cargo install --path .` and then add to `settings.json`:
 
