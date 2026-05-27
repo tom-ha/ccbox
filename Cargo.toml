@@ -1,0 +1,41 @@
+[package]
+name         = "ccbox"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.74"
+license      = "Apache-2.0"
+authors      = ["Tom-HA <tom.harpaz98@gmail.com>"]
+description  = "A fast, Rust statusline for Claude Code — drawn under every prompt."
+repository   = "https://github.com/tom-ha/ccbox"
+
+[lib]
+name = "ccbox"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ccbox"
+path = "src/bin/ccbox.rs"
+
+[[bin]]
+name = "ccbox-demo"
+path = "src/bin/ccbox_demo.rs"
+
+[dependencies]
+serde         = { version = "1.0", features = ["derive"] }
+serde_json    = "1.0"
+anyhow        = "1.0"
+regex         = "1.10"
+chrono        = { version = "0.4", default-features = false, features = ["clock", "std"] }
+once_cell     = "1.19"
+memchr        = "2.7"
+wait-timeout  = "0.2"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+tempfile          = "3.10"
+proptest          = { version = "1", default-features = false, features = ["std"] }
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"

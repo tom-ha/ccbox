@@ -1,0 +1,20 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# Editors / IDEs
+.vscode/
+.idea/
+
+# Claude Code per-user settings (keep commands/skills tracked)
+.claude/settings.local.json
+
+# Codex per-user agent config (not part of the ccbox surface)
+.codex/
+
+# OpenSpec archive — keep active proposals tracked, but archived ones live
+# locally only to keep the repo focused on current state.
+openspec/changes/archive/

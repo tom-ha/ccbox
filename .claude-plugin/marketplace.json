@@ -1,0 +1,18 @@
+{
+  "name": "ccbox",
+  "owner": {
+    "name": "tom-ha"
+  },
+  "metadata": {
+    "description": "Install and wire up ccbox, the Rust statusline for Claude Code.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "ccbox",
+      "source": "./",
+      "description": "Install and wire up ccbox, the Rust statusline for Claude Code.",
+      "version": "0.1.0"
+    }
+  ]
+}

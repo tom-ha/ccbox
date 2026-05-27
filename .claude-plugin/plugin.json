@@ -1,0 +1,15 @@
+{
+  "name": "ccbox",
+  "description": "Install and wire up ccbox, the Rust statusline for Claude Code.",
+  "version": "0.1.0",
+  "author": {
+    "name": "tom-ha"
+  },
+  "repository": "https://github.com/tom-ha/ccbox",
+  "license": "Apache-2.0",
+  "keywords": [
+    "claude-code",
+    "statusline",
+    "ccbox"
+  ]
+}
