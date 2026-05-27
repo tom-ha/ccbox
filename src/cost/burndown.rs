@@ -31,30 +31,6 @@ pub fn burndown_delta(
     Some(used_pct - ideal_pct)
 }
 
-/// Subagent average tokens-per-minute. Returns `None` until at least
-/// `floor_seconds` of activity have accumulated.
-pub fn subagent_avg_tpm(
-    total_input: u64,
-    output: u64,
-    first_timestamp: f64,
-    now: f64,
-    floor_seconds: f64,
-) -> Option<u64> {
-    if first_timestamp == 0.0 || now - first_timestamp < floor_seconds {
-        return None;
-    }
-    let minutes = (now - first_timestamp) / 60.0;
-    Some(((total_input + output) as f64 / minutes).round() as u64)
-}
-
-/// Share of session tokens consumed by a given subagent.
-pub fn subagent_share(sub_inout: i64, session_inout: i64) -> Option<f64> {
-    if session_inout <= 0 {
-        return None;
-    }
-    Some(sub_inout as f64 / session_inout as f64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,5 +1,6 @@
 //! `OpenspecRow` — one row per active openspec change.
 
+use crate::glyphs::{BOLD, RESET};
 use crate::layout::RowSpec;
 
 use super::component::{Component, ComponentOutput, SeparatorPolicy};
@@ -34,10 +35,13 @@ impl Component for OpenspecRow {
                 RowSpec::content(r.openspec_bar(name, *d as i32, *t as i32, ctx.width, title_w, i))
             })
             .collect();
+        let label = r.theme.label;
+        let leading_left_chip = format!(" {label}{BOLD}OpenSpec{RESET} ");
         ComponentOutput {
             rows,
             leading_separator: SeparatorPolicy::Strong,
             top_right_chip: String::new(),
+            leading_left_chip,
         }
     }
 }

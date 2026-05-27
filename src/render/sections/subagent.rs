@@ -1,13 +1,11 @@
-//! `subagent_activity`, `subagent_row` (narrow + wide variants).
+//! `subagent_activity`, `subagent_row` — single-line table row per agent.
 
-use crate::cost::burndown::{subagent_avg_tpm, subagent_share};
 use crate::data::running_subagents::{RunningSubagent, SubagentActivity};
 use crate::glyphs::{
-    BOLD, GLYPH_CONTINUATION, GLYPH_HOURGLASS, GLYPH_PIE, GLYPH_REPLYING, GLYPH_SUBAGENT_ROW,
-    GLYPH_TASKS, GLYPH_THINKING, RESET,
+    BOLD, GLYPH_HOURGLASS, GLYPH_REPLYING, GLYPH_SUBAGENT_ROW, GLYPH_TASKS, GLYPH_THINKING, RESET,
 };
 use crate::render::format::{fmt_dur, fmt_tok};
-use crate::render::palette::{model_key, rainbow_at};
+use crate::render::palette::rainbow_at;
 use crate::render::Renderer;
 use crate::width::{pad, visible_width};
 
@@ -26,6 +24,9 @@ fn tool_arg_key(name: &str) -> Option<&'static str> {
 fn truncate_to_width(s: &str, n: usize) -> String {
     if visible_width(s) <= n {
         return s.to_string();
+    }
+    if n == 0 {
+        return String::new();
     }
     let mut out = String::new();
     let mut w = 0;
@@ -88,14 +89,16 @@ impl Renderer {
         }
     }
 
-    /// Render a single subagent row. Wide variant (width > 100) emits two
-    /// lines joined by `\n`; narrow variant emits one.
+    /// Render a single subagent table row. Columns:
+    /// `⫷ type  description · activity  ⌛ tokens  duration`. `type_w` is the
+    /// column width caller pre-computes across all subagents so multiple rows
+    /// align as a table.
     pub fn subagent_row(
         &self,
         sub: &RunningSubagent,
         width: i32,
-        session_inout: i64,
-        step: usize,
+        type_w: usize,
+        idx: usize,
         now: f64,
     ) -> String {
         let dur = if sub.first_timestamp > 0.0 {
@@ -104,145 +107,80 @@ impl Renderer {
             0.0
         };
         let dur_s = format!("{:>5}", fmt_dur(dur));
-        let out_s = fmt_tok(sub.output);
-        let tok_s = fmt_tok(sub.total_input);
+        let tok_s = format!("{:>5}", fmt_tok(sub.total_input));
 
-        let short_model = model_key(&sub.model).to_key();
-        let model_clr = self.model_colour(&sub.model);
         let ctx_clr = self.risk_zone_color(sub.total_input);
-
-        let c_marker = rainbow_at(step, 12);
+        let c_marker = rainbow_at(idx, 12);
         let type_text = if sub.agent_type.is_empty() {
             "?"
         } else {
             &sub.agent_type
         };
-
-        let target_w = (width - 4).max(0);
         let t = self.theme;
+        let target_w = (width - 4).max(0);
 
-        if width > 100 {
-            let head1_w = 3 + visible_width(type_text) as i32 + 3;
-            let desc_budget = pad(target_w, head1_w);
-            let desc_text = if visible_width(&sub.description) > desc_budget {
-                if desc_budget == 0 {
-                    String::new()
-                } else {
-                    truncate_to_width(&sub.description, desc_budget)
-                }
+        // Right cluster: ⌛ <tokens>   <duration>
+        let right = format!(
+            "{ctx_clr}{GLYPH_HOURGLASS} {tok_s}{RESET}   {}{dur_s}{RESET}",
+            t.ctx,
+        );
+        let right_w = visible_width(&right) as i32;
+
+        // Left lead: ⫷ <type:type_w>
+        let type_pad = type_w.saturating_sub(visible_width(type_text));
+        let lead = format!(
+            "{c_marker}{BOLD}{GLYPH_SUBAGENT_ROW}{RESET}  {}{type_text}{}{RESET}",
+            t.skills,
+            " ".repeat(type_pad),
+        );
+        let lead_w = 3 + type_w as i32;
+
+        // Middle: description and activity. The two columns share whatever
+        // budget is left between lead and right cluster.
+        let middle_budget = (target_w - lead_w - right_w - 2).max(0) as usize;
+        let activity = self.subagent_activity(&sub.last_activity);
+        let activity_w = visible_width(&activity);
+        let desc_raw = sub.description.as_str();
+        let desc_w_raw = visible_width(desc_raw);
+
+        let middle = if middle_budget == 0 {
+            String::new()
+        } else if activity.is_empty() {
+            let desc = truncate_to_width(desc_raw, middle_budget);
+            format!("{}{desc}{RESET}", t.ctx)
+        } else if desc_raw.is_empty() {
+            let act = truncate_to_width(&activity, middle_budget);
+            format!("{}{act}{RESET}", t.ctx_dim)
+        } else {
+            let sep_w = 3; // " · "
+            if desc_w_raw + sep_w + activity_w <= middle_budget {
+                format!(
+                    "{}{desc_raw}{RESET} {}·{RESET} {}{activity}{RESET}",
+                    t.ctx, t.label, t.ctx_dim,
+                )
             } else {
-                sub.description.clone()
-            };
-            let left1 = format!(
-                "{c_marker}{BOLD}{GLYPH_SUBAGENT_ROW}{RESET}  {}{type_text}{RESET} {}·{RESET} {}{desc_text}{RESET}",
-                t.skills, t.label, t.ctx,
-            );
-            let left1_w = head1_w + visible_width(&desc_text) as i32;
-            let pad1 = (target_w - left1_w).max(1) as usize;
-            let line1 = format!("{left1}{}", " ".repeat(pad1));
-
-            let tpm = subagent_avg_tpm(sub.total_input, sub.output, sub.first_timestamp, now, 3.0);
-            let share = subagent_share((sub.total_input + sub.output) as i64, session_inout);
-
-            let sep = format!(" {}·{RESET} ", t.label);
-            let tok_field = format!("{:>5}", fmt_tok(sub.total_input));
-            let out_plain = format!("↑ {}", out_s);
-            let out_pad = " ".repeat(6usize.saturating_sub(out_plain.chars().count()));
-
-            let tpm_str = tpm
-                .map(|v| format!("{:>5}", format_with_commas(v)))
-                .unwrap_or_default();
-            let (share_clr, share_str) = match share {
-                Some(s) => {
-                    let c = self.gradient().gradient_color(s, 1.0);
-                    let pct = s * 100.0;
-                    (c, format!("{:>6}", format!("{pct:.1}%")))
+                // Prefer activity over description when both can't fit.
+                let act_budget = activity_w.min(middle_budget.saturating_sub(sep_w + 4));
+                let act = truncate_to_width(&activity, act_budget.max(1));
+                let act_visible = visible_width(&act);
+                let desc_budget = middle_budget.saturating_sub(act_visible + sep_w);
+                if desc_budget >= 3 {
+                    let desc = truncate_to_width(desc_raw, desc_budget);
+                    format!(
+                        "{}{desc}{RESET} {}·{RESET} {}{act}{RESET}",
+                        t.ctx, t.label, t.ctx_dim,
+                    )
+                } else {
+                    let act = truncate_to_width(&activity, middle_budget);
+                    format!("{}{act}{RESET}", t.ctx_dim)
                 }
-                None => (String::new(), String::new()),
-            };
-
-            let activity = self.subagent_activity(&sub.last_activity);
-            let left2_w = 6 + visible_width(&activity) as i32;
-            let left2 = format!(
-                "   {}{GLYPH_CONTINUATION}{RESET}  {}{activity}{RESET}",
-                t.ctx_dim, t.ctx_dim,
-            );
-
-            let cluster = |show_tpm: bool, show_share: bool, show_out: bool| -> String {
-                let mut frags: Vec<String> = Vec::new();
-                if show_tpm && !tpm_str.is_empty() {
-                    frags.push(format!("{}{tpm_str}{RESET}{} t/m{RESET}", t.tok, t.label));
-                }
-                if show_share && !share_str.is_empty() {
-                    frags.push(format!("{share_clr}{GLYPH_PIE} {share_str}{RESET}"));
-                }
-                let mut tok_seg = format!("{ctx_clr}{tok_field}{RESET}");
-                if show_out {
-                    tok_seg.push_str(&format!(
-                        " {out_pad}{}{BOLD}↑ {RESET}{}{}{RESET}",
-                        t.label, t.ctx, out_s,
-                    ));
-                }
-                frags.push(tok_seg);
-                frags.push(format!("{}{dur_s}{RESET}", t.ctx));
-                frags.push(format!("{model_clr}{:>6}{RESET}", short_model));
-                frags.join(&sep)
-            };
-
-            let mut show_tpm = tpm.is_some();
-            let mut show_share = share.is_some();
-            let mut show_out = true;
-            let fits = |st: bool, sh: bool, so: bool| {
-                left2_w + visible_width(&cluster(st, sh, so)) as i32 + 1 <= target_w
-            };
-            if !fits(show_tpm, show_share, show_out) && show_share {
-                show_share = false;
             }
-            if !fits(show_tpm, show_share, show_out) && show_out {
-                show_out = false;
-            }
-            if !fits(show_tpm, show_share, show_out) && show_tpm {
-                show_tpm = false;
-            }
-            let right2 = cluster(show_tpm, show_share, show_out);
-            let pad2 = (target_w - left2_w - visible_width(&right2) as i32).max(1) as usize;
-            let line2 = format!("{left2}{}{right2}", " ".repeat(pad2));
-            return format!("{line1}\n{line2}");
-        }
-
-        // narrow single-line
-        let tool_verb = match &sub.last_activity {
-            SubagentActivity::ToolUse { name, .. } => name.clone(),
-            SubagentActivity::Thinking => "(thinking)".into(),
-            SubagentActivity::Replying => "(replying)".into(),
-            SubagentActivity::None => String::new(),
         };
-        let right_n = format!(
-            "{ctx_clr}{GLYPH_HOURGLASS} {tok_s}{RESET}  {}{BOLD}↑{RESET}{}{out_s}{RESET}  {}{dur_s}{RESET}",
-            t.label, t.ctx, t.ctx,
-        );
-        let right_n_w = visible_width(&right_n) as i32;
-        let left_n = format!(
-            "{c_marker}{BOLD}{GLYPH_SUBAGENT_ROW}{RESET}  {}{type_text}{RESET}  {model_clr}{short_model}{RESET}  {}{tool_verb}{RESET}",
-            t.skills, t.ctx,
-        );
-        let left_n_w = visible_width(&left_n) as i32;
-        let pad_n = (target_w - left_n_w - right_n_w).max(1) as usize;
-        format!("{left_n}{}{right_n}", " ".repeat(pad_n))
-    }
-}
 
-fn format_with_commas(n: u64) -> String {
-    let s = n.to_string();
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, &c) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c as char);
+        let middle_visible = visible_width(&middle) as i32;
+        let pad = pad(target_w, lead_w + 2 + middle_visible + right_w).max(1);
+        format!("{lead}  {middle}{}{right}", " ".repeat(pad))
     }
-    out
 }
 
 #[cfg(test)]
@@ -275,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_row_narrow_single_line() {
+    fn subagent_row_is_single_line() {
         let r = Renderer::default();
         let sub = RunningSubagent {
             agent_type: "Explore".into(),
@@ -287,12 +225,14 @@ mod tests {
             last_activity: SubagentActivity::Thinking,
             ..Default::default()
         };
-        let s = r.subagent_row(&sub, 80, 5000, 0, 1_000_000_060.0);
-        assert!(!s.contains('\n'));
+        for w in [80, 100, 130] {
+            let s = r.subagent_row(&sub, w, 7, 0, 1_000_000_060.0);
+            assert!(!s.contains('\n'), "width={w}: row should be single-line");
+        }
     }
 
     #[test]
-    fn subagent_row_wide_two_lines() {
+    fn subagent_row_drops_tpm_share_model_output() {
         let r = Renderer::default();
         let sub = RunningSubagent {
             agent_type: "Explore".into(),
@@ -304,15 +244,17 @@ mod tests {
             last_activity: SubagentActivity::Replying,
             ..Default::default()
         };
-        let s = r.subagent_row(&sub, 130, 5000, 0, 1_000_000_060.0);
-        assert!(s.contains('\n'));
-    }
-
-    #[test]
-    fn format_with_commas_thousands() {
-        assert_eq!(format_with_commas(1234), "1,234");
-        assert_eq!(format_with_commas(1_234_567), "1,234,567");
-        assert_eq!(format_with_commas(0), "0");
-        assert_eq!(format_with_commas(999), "999");
+        let row = r.subagent_row(&sub, 130, 7, 0, 1_000_000_060.0);
+        let plain = crate::ansi::strip_ansi(&row);
+        assert!(!plain.contains("t/m"), "tpm should be dropped: {plain:?}");
+        assert!(
+            !plain.contains('↑'),
+            "output marker should be dropped: {plain:?}",
+        );
+        assert!(!plain.contains('%'), "share % should be dropped: {plain:?}");
+        assert!(
+            !plain.to_lowercase().contains("sonnet"),
+            "model name should be dropped: {plain:?}",
+        );
     }
 }
