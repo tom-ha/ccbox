@@ -2,7 +2,7 @@
 name: install-ccbox
 description: Use when the user wants to install ccbox, set up ccbox, or wire up the ccbox statusline for Claude Code. Runs the published curl one-liner installer and verifies that the `ccbox` binary is on PATH and that Claude Code's `settings.json` `statusLine.command` was patched to point at it.
 license: Apache-2.0
-allowed-tools: Bash(curl:*), Bash(cargo:*), Bash(ccbox:*), Bash(cat:*), Bash(command:*), Read
+allowed-tools: Bash(curl:*), Bash(cargo:*), Bash(ccbox:*), Bash(cat:*), Bash(command:*), Bash(uname:*), Bash(system_profiler:*), Bash(fc-list:*), Bash(grep:*), Read
 ---
 
 # Install ccbox
@@ -32,7 +32,18 @@ Install ccbox — the Rust statusline for Claude Code — and confirm it is wire
 
 4. **Verify settings.json was patched.** Read `$CLAUDE_CONFIG_DIR/settings.json` (or `~/.claude/settings.json`) and confirm `statusLine.command` points at the binary path reported in step 3. If the field is missing or points elsewhere, surface the mismatch.
 
-5. **Tell the user to restart Claude Code.** The statusline subprocess is wired up at Claude Code startup, so the user must fully restart Claude Code before the new statusline appears.
+5. **Best-effort Nerd Font check.** ccbox's glyphs only render correctly with a Nerd Font. Detect by OS:
+
+   - **macOS** (`uname -s` = `Darwin`): `system_profiler SPFontsDataType 2>/dev/null | grep -i 'nerd font' | head -5`
+   - **Linux** (`uname -s` = `Linux`): `fc-list 2>/dev/null | grep -i 'nerd font' | head -5`
+   - **Other / command missing:** skip silently.
+
+   This is advisory, **not a hard fail**. The check looks for "Nerd Font" in the family name and will miss Nerd-patched fonts that use a `NF` / `NFM` suffix instead (e.g. `JetBrainsMono NF`, `MesloLGS NF`). It also can't tell whether the terminal is actually configured to use the font it finds.
+
+   - If nothing matches: tell the user you couldn't detect a Nerd Font, point them at https://www.nerdfonts.com/, and ask whether their terminal is already configured to use one — don't block on the answer.
+   - If something matches: mention what you found and remind them their terminal must be configured to use it.
+
+6. **Tell the user to restart Claude Code.** The statusline subprocess is wired up at Claude Code startup, so the user must fully restart Claude Code before the new statusline appears.
 
 ## Notes
 
