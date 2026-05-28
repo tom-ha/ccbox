@@ -4,15 +4,15 @@
     "name": "tom-ha"
   },
   "metadata": {
-    "description": "Install and wire up ccbox, the Rust statusline for Claude Code.",
-    "version": "0.1.0"
+    "description": "Install ccbox (a Rust statusline for Claude Code) and toggle its rows at runtime with /ccbox.",
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "ccbox",
       "source": "./",
-      "description": "Install and wire up ccbox, the Rust statusline for Claude Code.",
-      "version": "0.1.0"
+      "description": "Install ccbox (a Rust statusline for Claude Code) and toggle its rows at runtime with /ccbox.",
+      "version": "0.2.0"
     }
   ]
 }
