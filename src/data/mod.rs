@@ -10,4 +10,5 @@ pub mod task_list;
 pub mod token_log;
 pub mod token_rate;
 pub mod transcript_usage;
+pub mod user_messages;
 pub mod workspace;

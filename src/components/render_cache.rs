@@ -23,6 +23,7 @@ use crate::data::task_list::TaskList;
 use crate::data::token_log::TokenLog;
 use crate::data::token_rate::{TokenRate, WINDOW};
 use crate::data::transcript_usage::TranscriptUsage;
+use crate::data::user_messages::last_user_prompt_ts;
 
 use super::context::ComponentContext;
 
@@ -36,6 +37,7 @@ pub struct RenderCache {
     token_rate: OnceCell<u64>,
     git_info: OnceCell<GitInfo>,
     task_list: OnceCell<TaskList>,
+    last_prompt_ts: OnceCell<f64>,
     running_subagents: OnceCell<RunningSubagents>,
     openspec: OnceCell<OpenSpec>,
     loaded_skills: OnceCell<LoadedSkills>,
@@ -107,13 +109,21 @@ impl RenderCache {
             .get_or_init(|| TaskList::from_session(&ctx.session.transcript_path))
     }
 
+    pub fn last_prompt_ts(&self, ctx: &ComponentContext) -> f64 {
+        *self
+            .last_prompt_ts
+            .get_or_init(|| last_user_prompt_ts(&ctx.session.transcript_path))
+    }
+
     pub fn running_subagents(&self, ctx: &ComponentContext) -> &RunningSubagents {
+        let anchor = self.last_prompt_ts(ctx);
         self.running_subagents.get_or_init(|| {
             RunningSubagents::from_session(
                 &ctx.env.claude_dir,
                 &ctx.session.session_id,
                 &ctx.session.workspace.project_dir,
                 ctx.now,
+                anchor,
             )
         })
     }

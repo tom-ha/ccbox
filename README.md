@@ -2,20 +2,8 @@
 
 A fast, Rust statusline for [Claude Code](https://claude.com/claude-code) — drawn under every prompt. It surfaces what's actually relevant during a session: which model you're on, context-window burn, session tokens and cost, in-flight tasks and subagents, OpenSpec progress, and your active Python venv — themed and configurable from your shell rc.
 
-![ccbox statusline](docs/hero.png)
-<!-- TODO: drop a real hero screenshot at docs/hero.png to replace this placeholder. -->
+![ccbox statusline](screenshots/example.png)
 
-```
-╭───────────────────────────────────────────────────────[ 51e977df…  1h23m ]─╮
-│ 󰉋  /Users/you/code/ccbox                                    main    󰢹 Sonnet 4.6│
-├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┤
-│ ctx  120K of 200.0K (60%)  ████████████████████████░░░░░░░░░░░░░░░░░░░░     │
-├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┤
-│ ↓ in 120K   ↑ out 3.4K   $0.18 sess · $1.42 today   󱢧 4.2K t/m ▁▂▃▅▆▇█▇▆▅▃▂▁│
-├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┤
-│  todo 2   ▶  doing 1  ship-the-feature   done 5 ✓                            │
-╰─────────────────────────────────────────────────────────────────────────────╯
-```
 
 ## Features
 

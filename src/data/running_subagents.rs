@@ -15,7 +15,7 @@ use crate::data::iso::parse_iso_to_epoch;
 pub enum SubagentActivity {
     ToolUse { name: String, input: Value },
     Thinking,
-    Replying,
+    Responding,
     None,
 }
 
@@ -44,7 +44,11 @@ pub struct RunningSubagents {
     pub agents: Vec<RunningSubagent>,
 }
 
-const STALE_SECONDS: f64 = 20.0;
+/// Fallback retention window used when the caller can't supply a
+/// `last_prompt_ts` (e.g. brand-new session with no user message yet). Tuned
+/// long enough to span a typical prompt-response cycle so freshly-finished
+/// agents stay visible until the next prompt resets the boundary.
+const STALE_SECONDS: f64 = 600.0;
 
 fn project_slug(project_dir: &str) -> String {
     project_dir
@@ -54,7 +58,22 @@ fn project_slug(project_dir: &str) -> String {
 }
 
 impl RunningSubagents {
-    pub fn from_session(claude_dir: &Path, session_id: &str, project_dir: &str, now: f64) -> Self {
+    /// Load subagent transcripts for the current session.
+    ///
+    /// `last_prompt_ts` is the Unix epoch second of the most recent real
+    /// user prompt (see [`crate::data::user_messages::last_user_prompt_ts`]).
+    /// When `> 0.0`, an agent is retained iff its `first_timestamp` is at
+    /// or after that boundary — i.e. it belongs to the current prompt cycle
+    /// — so a completed agent stays visible until the user submits the next
+    /// prompt. When `0.0` (no anchor available), falls back to a wide
+    /// `STALE_SECONDS` mtime window.
+    pub fn from_session(
+        claude_dir: &Path,
+        session_id: &str,
+        project_dir: &str,
+        now: f64,
+        last_prompt_ts: f64,
+    ) -> Self {
         if session_id.is_empty() || project_dir.is_empty() {
             return Self::default();
         }
@@ -109,10 +128,17 @@ impl RunningSubagents {
                     .unwrap_or(0.0),
                 Err(_) => continue,
             };
-            if now - mtime > STALE_SECONDS {
+            let parsed = parse_subagent_transcript(&jsonl);
+            // Anchor visibility to the current prompt cycle when we know it;
+            // otherwise fall back to the recency window.
+            let keep = if last_prompt_ts > 0.0 && parsed.first_ts > 0.0 {
+                parsed.first_ts >= last_prompt_ts
+            } else {
+                now - mtime < STALE_SECONDS
+            };
+            if !keep {
                 continue;
             }
-            let parsed = parse_subagent_transcript(&jsonl);
             agents.push(RunningSubagent {
                 session_id: session_id.to_string(),
                 agent_type,
@@ -217,7 +243,7 @@ fn parse_subagent_transcript(path: &Path) -> Parsed {
                         };
                     }
                     Some("thinking") => p.last_activity = SubagentActivity::Thinking,
-                    Some("text") => p.last_activity = SubagentActivity::Replying,
+                    Some("text") => p.last_activity = SubagentActivity::Responding,
                     _ => {}
                 }
             }
@@ -236,17 +262,17 @@ mod tests {
     #[test]
     fn missing_subagents_dir_yields_empty() {
         let dir = tempdir().unwrap();
-        let r = RunningSubagents::from_session(dir.path(), "session", "/p", 1000.0);
+        let r = RunningSubagents::from_session(dir.path(), "session", "/p", 1000.0, 0.0);
         assert!(r.agents.is_empty());
     }
 
     #[test]
     fn empty_session_or_project_yields_empty() {
         let dir = tempdir().unwrap();
-        assert!(RunningSubagents::from_session(dir.path(), "", "/p", 0.0)
+        assert!(RunningSubagents::from_session(dir.path(), "", "/p", 0.0, 0.0)
             .agents
             .is_empty());
-        assert!(RunningSubagents::from_session(dir.path(), "s", "", 0.0)
+        assert!(RunningSubagents::from_session(dir.path(), "s", "", 0.0, 0.0)
             .agents
             .is_empty());
     }
@@ -278,13 +304,14 @@ mod tests {
             .unwrap()
             .write_all(b"")
             .unwrap();
-        // pretend it's old by passing a future `now`
+        // pretend it's old by passing a future `now` well past the
+        // fallback STALE_SECONDS window; no prompt anchor available.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64()
-            + 100.0;
-        let r = RunningSubagents::from_session(dir.path(), "s", "/p", now);
+            + (STALE_SECONDS + 1000.0);
+        let r = RunningSubagents::from_session(dir.path(), "s", "/p", now, 0.0);
         assert!(r.agents.is_empty());
     }
 
@@ -321,9 +348,64 @@ mod tests {
             .unwrap()
             .as_secs_f64()
             + 5.0;
-        let r = RunningSubagents::from_session(dir.path(), "s", "/p", now);
+        let r = RunningSubagents::from_session(dir.path(), "s", "/p", now, 0.0);
         assert_eq!(r.agents.len(), 1);
         assert_eq!(r.agents[0].agent_type, "Explore");
         assert_eq!(r.agents[0].description, "look around");
+    }
+
+    /// Two subagents: one whose `first_timestamp` predates the last user
+    /// prompt (previous cycle) and one whose `first_timestamp` is after it
+    /// (current cycle). Only the latter should be retained, regardless of
+    /// how old the jsonl mtimes are.
+    #[test]
+    fn prompt_anchor_keeps_only_current_cycle_agents() {
+        let dir = tempdir().unwrap();
+        let slug = project_slug("/p");
+        let subagents = dir
+            .path()
+            .join("projects")
+            .join(&slug)
+            .join("s")
+            .join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+
+        // Previous-cycle agent.
+        std::fs::write(
+            subagents.join("old.meta.json"),
+            r#"{"agentType":"Explore","description":"old"}"#,
+        )
+        .unwrap();
+        std::fs::File::create(subagents.join("old.jsonl"))
+            .unwrap()
+            .write_all(
+                br#"{"timestamp":"2026-05-27T07:00:00.000Z","message":{}}
+"#,
+            )
+            .unwrap();
+
+        // Current-cycle agent.
+        std::fs::write(
+            subagents.join("new.meta.json"),
+            r#"{"agentType":"Plan","description":"new"}"#,
+        )
+        .unwrap();
+        std::fs::File::create(subagents.join("new.jsonl"))
+            .unwrap()
+            .write_all(
+                br#"{"timestamp":"2026-05-27T07:30:00.000Z","message":{}}
+"#,
+            )
+            .unwrap();
+
+        // Last user prompt: 07:15 — sits between the two agents.
+        let last_prompt_ts = crate::data::iso::parse_iso_to_epoch("2026-05-27T07:15:00.000Z");
+        // `now` deliberately far in the future so the STALE_SECONDS fallback
+        // would have rejected both files — proving the anchor path is what
+        // retains the new agent.
+        let now = last_prompt_ts + 100_000.0;
+        let r = RunningSubagents::from_session(dir.path(), "s", "/p", now, last_prompt_ts);
+        assert_eq!(r.agents.len(), 1, "got: {:?}", r.agents);
+        assert_eq!(r.agents[0].agent_type, "Plan");
     }
 }

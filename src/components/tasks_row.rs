@@ -1,6 +1,7 @@
 //! `TasksRow` — inline or board kanban.
 
 use crate::config::TasksView;
+use crate::glyphs::{BOLD, RESET};
 use crate::layout::RowSpec;
 
 use super::component::{Component, ComponentOutput, SeparatorPolicy};
@@ -29,11 +30,13 @@ impl Component for TasksRow {
                 .collect(),
             TasksView::Inline => vec![RowSpec::content(r.task_row(tasks, ctx.width, 0))],
         };
+        let label = r.theme.label;
+        let leading_left_chip = format!(" {label}{BOLD}Tasks{RESET} ");
         ComponentOutput {
             rows,
-            leading_separator: SeparatorPolicy::Dim,
+            leading_separator: SeparatorPolicy::Strong,
             top_right_chip: String::new(),
-            leading_left_chip: String::new(),
+            leading_left_chip,
         }
     }
 }
