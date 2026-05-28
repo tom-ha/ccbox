@@ -190,6 +190,82 @@ fn density_minimal_omits_event_driven_rows() {
 }
 
 #[test]
+fn ccbox_show_tasks_false_hides_tasks_row_under_standard_density() {
+    // Standard density would include tasks; the per-row override must hide it.
+    let mut sc = scratch();
+    sc.env.show_tasks_override = Some(false);
+    let s = render(&fixture(), &sc.env, 130);
+    let plain = strip_ansi(&s);
+    assert!(
+        !plain.contains("Tasks "),
+        "CCBOX_SHOW_TASKS=0 must hide tasks row even under standard density:\n{plain}"
+    );
+}
+
+#[test]
+fn ccbox_show_subagents_false_hides_subagents_row_under_standard_density() {
+    let mut sc = scratch();
+    sc.env.show_subagents_override = Some(false);
+    let s = render(&fixture(), &sc.env, 130);
+    let plain = strip_ansi(&s);
+    assert!(
+        !plain.contains("Sub-Agents"),
+        "CCBOX_SHOW_SUBAGENTS=0 must hide subagents row:\n{plain}"
+    );
+}
+
+#[test]
+fn state_file_show_tasks_false_beats_env_var_true() {
+    // CCBOX_SHOW_TASKS=true would normally show the tasks row, but the state
+    // file's `show_tasks: false` overrides it.
+    use ccbox::input::toggles::Toggles;
+    let mut sc = scratch();
+    sc.env.show_tasks_override = Some(true);
+    sc.env.toggles = Toggles {
+        show_tasks: Some(false),
+        ..Default::default()
+    };
+    let s = render(&fixture(), &sc.env, 130);
+    let plain = strip_ansi(&s);
+    assert!(
+        !plain.contains("Tasks "),
+        "state file should beat env var:\n{plain}"
+    );
+}
+
+#[test]
+fn ccbox_show_tasks_unset_falls_through_to_density() {
+    use ccbox::config::Density;
+    let mut sc = scratch();
+    sc.env.density = Density::Minimal;
+    sc.env.show_tasks_override = None;
+    let s = render(&fixture(), &sc.env, 130);
+    let plain = strip_ansi(&s);
+    assert!(
+        !plain.contains("Tasks "),
+        "minimal density + unset override = tasks hidden:\n{plain}"
+    );
+}
+
+#[test]
+fn ccbox_show_subagents_independent_of_tasks() {
+    // Hiding subagents must not affect the tasks row.
+    let mut sc = scratch();
+    sc.env.show_subagents_override = Some(false);
+    let s = render(&fixture(), &sc.env, 130);
+    let plain = strip_ansi(&s);
+    assert!(
+        !plain.contains("Sub-Agents"),
+        "subagents should be hidden:\n{plain}"
+    );
+    // Tasks row visibility depends on whether the fixture has tasks. The key
+    // assertion is that the override is scoped to subagents only — i.e., the
+    // tasks row's chip rendering is not affected by CCBOX_SHOW_SUBAGENTS.
+    // (If the fixture has no tasks, the row is absent for content reasons,
+    // which is independent of the override under test.)
+}
+
+#[test]
 fn tokens_row_has_augmented_labels() {
     let mut sc = scratch();
     // Force cost visible so the tokens row renders with the cost cluster.

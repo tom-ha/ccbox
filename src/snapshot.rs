@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::ansi::strip_ansi;
 use crate::components::{compose, ComponentContext, Composition, RenderCache};
-use crate::config::{Density, Env, TasksView};
+use crate::config::{resolve_row_visibility, Density, Env, RowVisibilitySource, TasksView};
 use crate::consts::{MEDIUM_WIDTH, MIN_WIDTH, NARROW_WIDTH};
 use crate::input::session::SessionInfo;
 use crate::layout::fill_ratio;
@@ -83,11 +83,44 @@ fn env_json(env: &Env) -> Value {
         "max_width": env.max_width,
         "full_width": env.full_width,
         "show_cost_override": env.show_cost_override,
+        "show_tasks_override": env.show_tasks_override,
+        "show_subagents_override": env.show_subagents_override,
+        "toggles": {
+            "show_tasks": env.toggles.show_tasks,
+            "show_subagents": env.toggles.show_subagents,
+        },
+        "row_visibility": row_visibility_json(env),
         "venv": env.venv,
         "density": density_str(env.density),
         "tasks_view": tasks_view_str(env.tasks_view),
         "git_cache_ttl_ms": env.git_cache_ttl_ms,
     })
+}
+
+/// The post-override decision for each gated row, alongside the precedence
+/// layer that made the call (`state_file`, `env`, or `density`). `visible`
+/// here is the *override* layer's verdict — it does NOT account for content
+/// presence; the final boolean factoring content lives under
+/// `composition.body[*].visible`.
+fn row_visibility_json(env: &Env) -> Value {
+    let (tasks_override, tasks_src) =
+        resolve_row_visibility(env.toggles.show_tasks, env.show_tasks_override);
+    let tasks_visible = tasks_override.unwrap_or_else(|| env.density.includes_tasks());
+    let (sub_override, sub_src) =
+        resolve_row_visibility(env.toggles.show_subagents, env.show_subagents_override);
+    let sub_visible = sub_override.unwrap_or_else(|| env.density.includes_subagents());
+    json!({
+        "tasks":     { "visible": tasks_visible, "source": source_str(tasks_src) },
+        "subagents": { "visible": sub_visible,   "source": source_str(sub_src)  },
+    })
+}
+
+fn source_str(s: RowVisibilitySource) -> &'static str {
+    match s {
+        RowVisibilitySource::StateFile => "state_file",
+        RowVisibilitySource::Env => "env",
+        RowVisibilitySource::Density => "density",
+    }
 }
 
 fn density_str(d: Density) -> &'static str {

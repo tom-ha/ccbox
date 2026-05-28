@@ -1,5 +1,6 @@
 //! `SubagentsRow` — one row per running subagent (table layout).
 
+use crate::config::resolve_row_visibility;
 use crate::glyphs::{BOLD, RESET};
 use crate::layout::RowSpec;
 use crate::render::format::fmt_tok;
@@ -17,7 +18,12 @@ impl Component for SubagentsRow {
     }
 
     fn is_visible(&self, ctx: &ComponentContext) -> bool {
-        ctx.env.density.includes_subagents() && !ctx.data.running_subagents(ctx).agents.is_empty()
+        let (override_val, _src) = resolve_row_visibility(
+            ctx.env.toggles.show_subagents,
+            ctx.env.show_subagents_override,
+        );
+        let allowed = override_val.unwrap_or_else(|| ctx.env.density.includes_subagents());
+        allowed && !ctx.data.running_subagents(ctx).agents.is_empty()
     }
 
     fn render(&self, ctx: &ComponentContext) -> ComponentOutput {

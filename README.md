@@ -105,6 +105,74 @@ export CCBOX_DENSITY=minimal  # quietest
 export CCBOX_DENSITY=verbose  # show everything you've got
 ```
 
+For finer-grained control over just the tasks or subagents row — including a `/ccbox` slash command that toggles without restarting Claude Code — see **Per-row toggles** below.
+
+### Per-row toggles
+
+The density preset above is all-or-nothing across the four event-driven rows. When you want to hide *just* the tasks row or *just* the subagents row, use these per-row controls instead.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CCBOX_SHOW_TASKS` | unset | `1`/`true`/`yes`/`on` forces the tasks row visible (even under `CCBOX_DENSITY=minimal`). `0`/`false`/`no`/`off` hides it (even under `standard`/`verbose`). Unset = fall through to the density preset. |
+| `CCBOX_SHOW_SUBAGENTS` | unset | Same shape, for the subagents row. |
+
+```bash
+export CCBOX_SHOW_TASKS=0      # always hide the tasks row
+export CCBOX_SHOW_SUBAGENTS=1  # always show subagents (when present)
+```
+
+#### Runtime toggle without a restart
+
+Env vars only take effect on the next Claude Code launch. For live toggling, ccbox reads a small JSON file on every render and uses it to override the env vars for that session.
+
+| Path | Shape |
+|---|---|
+| `<claude_dir>/ccbox-toggles.json` | `{ "show_tasks": false, "show_subagents": true }` |
+
+Both keys are optional. Missing file, empty file, malformed JSON, and permission errors are all treated as "no overrides" silently — no warning, no panic. The file is written atomically (tempfile + rename), so concurrent processes never observe a half-written file.
+
+The `/ccbox` slash command (shipped with the plugin, mirrored under this repo's `.claude/commands/ccbox.md`) edits the file for you:
+
+```text
+/ccbox show tasks         # force tasks row visible
+/ccbox hide subagents     # force subagents row hidden
+/ccbox flip tasks         # invert current effective visibility
+/ccbox status             # report each row's current visibility and source
+```
+
+The slash command shells out to `ccbox toggle …`; the same subcommand is callable directly:
+
+```bash
+ccbox toggle show tasks
+ccbox toggle status
+```
+
+`status` prints a small table showing each row's resolved visibility and which precedence layer made the call:
+
+```
+row         visible  source
+tasks       false    state_file
+subagents   true     env
+```
+
+#### Precedence
+
+For each of the tasks and subagents rows, visibility resolves in this order — the first layer with an opinion wins:
+
+1. **State file** (`<claude_dir>/ccbox-toggles.json`) — the most recent / most interactive signal.
+2. **Env var** (`CCBOX_SHOW_TASKS` / `CCBOX_SHOW_SUBAGENTS`) — the persistent baseline.
+3. **Density preset** (`CCBOX_DENSITY`) — the broad default.
+
+Then AND with content presence — a row is never rendered when its content is empty, regardless of overrides.
+
+Heads-up: `/ccbox flip <row>` always persists the inverse of the *current effective* value, which can override an env var you set in your rc. If `/ccbox status` shows `source: state_file` and you'd rather follow your env var or density again, delete that key from `ccbox-toggles.json` (or remove the whole file).
+
+The `--snapshot` output exposes the resolved visibility and source under `env.row_visibility`, useful for debugging "why isn't this row rendering?":
+
+```bash
+ccbox --snapshot < session.json | jq '.env.row_visibility'
+```
+
 ### Tasks view (inline vs. board)
 
 | Variable | Default | Values |

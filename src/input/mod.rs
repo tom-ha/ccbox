@@ -2,3 +2,4 @@
 
 pub mod session;
 pub mod short_pwd;
+pub mod toggles;

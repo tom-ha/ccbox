@@ -121,3 +121,70 @@ fn snapshot_layout_for_wide_width() {
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(v["layout"], "wide");
 }
+
+#[test]
+fn snapshot_env_row_visibility_defaults_to_density() {
+    let raw = run_snapshot("140", &[]);
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let rv = &v["env"]["row_visibility"];
+    for row in ["tasks", "subagents"] {
+        assert_eq!(
+            rv[row]["source"], "density",
+            "{row}: expected density source when no env/state override",
+        );
+        // standard density includes both rows.
+        assert_eq!(rv[row]["visible"], true, "{row}: standard density visible");
+    }
+}
+
+#[test]
+fn snapshot_env_row_visibility_reports_env_source() {
+    let raw = run_snapshot("140", &[("CCBOX_SHOW_TASKS", "0")]);
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let rv = &v["env"]["row_visibility"];
+    assert_eq!(rv["tasks"]["source"], "env");
+    assert_eq!(rv["tasks"]["visible"], false);
+    // Subagents untouched.
+    assert_eq!(rv["subagents"]["source"], "density");
+}
+
+#[test]
+fn snapshot_env_row_visibility_reports_state_file_source() {
+    // Set up a tempdir with a state file and point ccbox at it via CLAUDE_CONFIG_DIR.
+    use std::io::Write;
+    use tempfile::TempDir;
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(dir.path()).unwrap();
+    let mut f = std::fs::File::create(dir.path().join("ccbox-toggles.json")).unwrap();
+    f.write_all(br#"{"show_subagents": false}"#).unwrap();
+    let claude_dir = dir.path().to_string_lossy().into_owned();
+
+    let raw = run_snapshot("140", &[("CLAUDE_CONFIG_DIR", claude_dir.as_str())]);
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let rv = &v["env"]["row_visibility"];
+    assert_eq!(rv["subagents"]["source"], "state_file");
+    assert_eq!(rv["subagents"]["visible"], false);
+    assert_eq!(rv["tasks"]["source"], "density");
+}
+
+#[test]
+fn snapshot_state_file_beats_env_var() {
+    use std::io::Write;
+    use tempfile::TempDir;
+    let dir = TempDir::new().unwrap();
+    let mut f = std::fs::File::create(dir.path().join("ccbox-toggles.json")).unwrap();
+    f.write_all(br#"{"show_tasks": false}"#).unwrap();
+    let claude_dir = dir.path().to_string_lossy().into_owned();
+
+    let raw = run_snapshot(
+        "140",
+        &[
+            ("CLAUDE_CONFIG_DIR", claude_dir.as_str()),
+            ("CCBOX_SHOW_TASKS", "1"), // env says show; state file says hide.
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let rv = &v["env"]["row_visibility"];
+    assert_eq!(rv["tasks"]["source"], "state_file");
+    assert_eq!(rv["tasks"]["visible"], false);
+}

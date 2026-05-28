@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::input::session::RateLimits;
+use crate::input::toggles::Toggles;
 
 /// Three-state density preset that gates which event-driven rows participate.
 ///
@@ -50,6 +51,16 @@ impl Default for TasksView {
     }
 }
 
+/// Which precedence layer decided a row's visibility. Used by [`resolve_row_visibility`]
+/// and surfaced in the `--snapshot` output so users can debug "why isn't this
+/// row rendering?" without reading source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowVisibilitySource {
+    StateFile,
+    Env,
+    Density,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Env {
     pub claude_dir: PathBuf,
@@ -60,6 +71,17 @@ pub struct Env {
     /// hidden, `None` lets [`should_show_cost`] auto-decide from rate-limit data.
     /// Populated from `CCBOX_SHOW_COST` at startup; see [`parse_bool_tristate`].
     pub show_cost_override: Option<bool>,
+    /// `Some(true)` forces the tasks row visible (even under `Density::Minimal`),
+    /// `Some(false)` forces it hidden (even under `Density::Standard`/`Verbose`),
+    /// `None` falls through to the state file then the density preset.
+    /// Populated from `CCBOX_SHOW_TASKS` at startup.
+    pub show_tasks_override: Option<bool>,
+    /// Same shape as [`Env::show_tasks_override`], for the subagents row.
+    /// Populated from `CCBOX_SHOW_SUBAGENTS` at startup.
+    pub show_subagents_override: Option<bool>,
+    /// Per-row toggles loaded from `<claude_dir>/ccbox-toggles.json`. Takes
+    /// precedence over the env-var overrides above; see [`resolve_row_visibility`].
+    pub toggles: Toggles,
     /// Short name of the active Python virtual environment, or `None`. Sourced
     /// from `VIRTUAL_ENV_PROMPT` (when set) or the basename of `VIRTUAL_ENV`.
     pub venv: Option<String>,
@@ -70,6 +92,24 @@ pub struct Env {
     /// TTL in milliseconds for the on-disk `GitInfo` cache (`0` disables).
     /// Populated from `CCBOX_GIT_CACHE_TTL_MS`; default `2000`.
     pub git_cache_ttl_ms: u64,
+}
+
+/// Resolve a row's effective override using the precedence chain
+/// state file → env var → density preset. Returns `(override, source)`.
+///
+/// `override = Some(true|false)` means the visibility is forced; `None` means
+/// fall back to the density preset and let the component's content check apply.
+pub fn resolve_row_visibility(
+    state: Option<bool>,
+    env_var: Option<bool>,
+) -> (Option<bool>, RowVisibilitySource) {
+    if let Some(v) = state {
+        (Some(v), RowVisibilitySource::StateFile)
+    } else if let Some(v) = env_var {
+        (Some(v), RowVisibilitySource::Env)
+    } else {
+        (None, RowVisibilitySource::Density)
+    }
 }
 
 /// Parse a tri-state boolean env-var value.
@@ -269,5 +309,49 @@ mod tests {
     #[test]
     fn should_show_cost_env_false_beats_marker() {
         assert!(!should_show_cost(&rl(0), Some(false), true));
+    }
+
+    #[test]
+    fn resolve_row_visibility_state_file_wins() {
+        assert_eq!(
+            resolve_row_visibility(Some(false), Some(true)),
+            (Some(false), RowVisibilitySource::StateFile),
+        );
+        assert_eq!(
+            resolve_row_visibility(Some(true), None),
+            (Some(true), RowVisibilitySource::StateFile),
+        );
+    }
+
+    #[test]
+    fn resolve_row_visibility_env_when_no_state() {
+        assert_eq!(
+            resolve_row_visibility(None, Some(false)),
+            (Some(false), RowVisibilitySource::Env),
+        );
+        assert_eq!(
+            resolve_row_visibility(None, Some(true)),
+            (Some(true), RowVisibilitySource::Env),
+        );
+    }
+
+    #[test]
+    fn resolve_row_visibility_density_fallthrough() {
+        assert_eq!(
+            resolve_row_visibility(None, None),
+            (None, RowVisibilitySource::Density),
+        );
+    }
+
+    #[test]
+    fn parse_bool_tristate_covers_new_env_vars() {
+        // The same parser backs CCBOX_SHOW_TASKS and CCBOX_SHOW_SUBAGENTS;
+        // exhaust the value space once more to lock in coverage of the new vars.
+        assert_eq!(parse_bool_tristate(Some("1")), Some(true));
+        assert_eq!(parse_bool_tristate(Some("0")), Some(false));
+        assert_eq!(parse_bool_tristate(Some("yes")), Some(true));
+        assert_eq!(parse_bool_tristate(Some("no")), Some(false));
+        assert_eq!(parse_bool_tristate(Some("maybe")), None);
+        assert_eq!(parse_bool_tristate(None), None);
     }
 }

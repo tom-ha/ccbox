@@ -1,6 +1,6 @@
 //! `TasksRow` — inline or board kanban.
 
-use crate::config::TasksView;
+use crate::config::{resolve_row_visibility, TasksView};
 use crate::glyphs::{BOLD, RESET};
 use crate::layout::RowSpec;
 
@@ -16,7 +16,12 @@ impl Component for TasksRow {
     }
 
     fn is_visible(&self, ctx: &ComponentContext) -> bool {
-        ctx.env.density.includes_tasks() && ctx.data.task_list(ctx).is_visible(ctx.now)
+        let (override_val, _src) = resolve_row_visibility(
+            ctx.env.toggles.show_tasks,
+            ctx.env.show_tasks_override,
+        );
+        let allowed = override_val.unwrap_or_else(|| ctx.env.density.includes_tasks());
+        allowed && ctx.data.task_list(ctx).is_visible(ctx.now)
     }
 
     fn render(&self, ctx: &ComponentContext) -> ComponentOutput {
