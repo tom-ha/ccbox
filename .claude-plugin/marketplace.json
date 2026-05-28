@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "Install ccbox (a Rust statusline for Claude Code) and toggle its rows at runtime with /ccbox.",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "ccbox",
       "source": "./",
       "description": "Install ccbox (a Rust statusline for Claude Code) and toggle its rows at runtime with /ccbox.",
-      "version": "0.2.0"
+      "version": "0.2.1"
     }
   ]
 }
