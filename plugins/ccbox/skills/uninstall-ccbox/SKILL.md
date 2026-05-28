@@ -1,8 +1,9 @@
 ---
 name: uninstall-ccbox
-description: Use when the user wants to uninstall ccbox, remove the ccbox statusline, or unwire ccbox from Claude Code. Runs the published curl one-liner uninstaller and verifies that `settings.json` no longer points at ccbox and that the binary is gone.
+description: Uninstall ccbox — the Rust statusline for Claude Code — and confirm it is unwired from settings.json and removed from disk. User-invoked only; the agent will not auto-trigger this skill.
 license: Apache-2.0
 allowed-tools: Bash(curl:*), Bash(cargo:*), Bash(command:*), Bash(cat:*), Read
+disable-model-invocation: true
 ---
 
 # Uninstall ccbox
