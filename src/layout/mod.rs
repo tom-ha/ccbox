@@ -1,5 +1,6 @@
 //! Responsive layout dispatch + ancillary time helpers.
 
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,8 +12,43 @@ use crate::render::sections::context_bar::effective_soft_limit;
 use crate::render::Renderer;
 use crate::theme::Theme;
 
-/// Wall-clock-since-transcript-mtime formatter — `Mm` or `NhMm`, empty if
-/// the transcript path is missing/empty.
+/// Cap on how much of the transcript we scan before giving up on finding a
+/// timestamped record. Real transcripts hit a timestamped event within the
+/// first few lines (the `mode` / `permission-mode` / `file-history-snapshot`
+/// prelude is short); these bounds just protect us from pathological inputs.
+const TRANSCRIPT_SCAN_LINE_LIMIT: usize = 64;
+const TRANSCRIPT_SCAN_BYTE_LIMIT: u64 = 64 * 1024;
+
+/// Read the JSONL transcript and return the Unix-seconds value of the first
+/// record whose object contains a parseable RFC-3339 `timestamp` field.
+///
+/// Leading records that lack the field (e.g. `mode`, `permission-mode`,
+/// `file-history-snapshot`) are skipped. Malformed lines are skipped, not
+/// fatal. Returns `None` if no timestamped record is found within the scan
+/// bounds, or if the file cannot be opened.
+fn transcript_start_secs(path: &Path) -> Option<f64> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(file.take(TRANSCRIPT_SCAN_BYTE_LIMIT));
+    for line in reader.lines().take(TRANSCRIPT_SCAN_LINE_LIMIT) {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => return None,
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(ts) = v.get("timestamp").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+            return Some(dt.timestamp() as f64 + f64::from(dt.timestamp_subsec_micros()) / 1.0e6);
+        }
+    }
+    None
+}
+
+/// Wall-clock-since-session-start formatter — `Mm` or `NhMm`, empty if the
+/// transcript is missing/empty or contains no timestamped record.
 pub fn session_elapsed(transcript_path: &str, now: Option<f64>) -> String {
     if transcript_path.is_empty() {
         return String::new();
@@ -21,21 +57,17 @@ pub fn session_elapsed(transcript_path: &str, now: Option<f64>) -> String {
     if !p.is_file() {
         return String::new();
     }
-    let mtime = match std::fs::metadata(p).and_then(|m| m.modified()) {
-        Ok(t) => t,
-        Err(_) => return String::new(),
+    let start_secs = match transcript_start_secs(p) {
+        Some(s) => s,
+        None => return String::new(),
     };
-    let mtime_secs = mtime
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
     let now_secs = now.unwrap_or_else(|| {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0)
     });
-    let mut secs = (now_secs - mtime_secs) as i64;
+    let mut secs = (now_secs - start_secs) as i64;
     if secs < 0 {
         secs = 0;
     }
@@ -161,12 +193,9 @@ pub fn render_layout(spec: &LayoutSpec, r: &Renderer) -> Vec<String> {
             RowKind::BottomBorder => {
                 out.push(border.border_bottom(spec.width, &row.ups, spec.fill))
             }
-            RowKind::Separator | RowKind::SeparatorSeam => out.push(border.border_separator(
-                spec.width,
-                &row.ups,
-                spec.fill,
-                &row.left_chip,
-            )),
+            RowKind::Separator | RowKind::SeparatorSeam => {
+                out.push(border.border_separator(spec.width, &row.ups, spec.fill, &row.left_chip))
+            }
             RowKind::SeparatorDim => out.push(border.border_separator_dim(
                 spec.width,
                 &row.downs,
@@ -229,41 +258,29 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
-    use std::time::Duration;
     use tempfile::tempdir;
 
-    fn touch_mtime(path: &Path, mtime: SystemTime) {
-        let secs = mtime.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-        let times = [
-            LibcTimeval {
-                tv_sec: secs,
-                tv_usec: 0,
-            },
-            LibcTimeval {
-                tv_sec: secs,
-                tv_usec: 0,
-            },
-        ];
-        let c_path = std::ffi::CString::new(path.as_os_str().to_string_lossy().as_bytes()).unwrap();
-        unsafe {
-            let r = libc_utimes(c_path.as_ptr(), times.as_ptr());
-            assert_eq!(r, 0, "utimes failed");
-        }
+    /// Format a Unix epoch second value as an RFC-3339 string with no
+    /// fractional component, e.g. `1999-09-09T01:46:40Z`. Used by the
+    /// transcript tests below.
+    fn rfc3339_from_unix(secs: i64) -> String {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     }
-    #[repr(C)]
-    struct LibcTimeval {
-        tv_sec: i64,
-        tv_usec: i64,
-    }
-    extern "C" {
-        #[link_name = "utimes"]
-        fn libc_utimes(path: *const i8, times: *const LibcTimeval) -> i32;
+
+    fn write_transcript(path: &Path, contents: &str) {
+        File::create(path)
+            .unwrap()
+            .write_all(contents.as_bytes())
+            .unwrap();
     }
 
     #[test]
     fn empty_path_returns_empty() {
         assert_eq!(session_elapsed("", None), "");
     }
+
     #[test]
     fn missing_file_returns_empty() {
         let dir = tempdir().unwrap();
@@ -272,29 +289,100 @@ mod tests {
             ""
         );
     }
+
     #[test]
     fn five_minutes_old() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("t.jsonl");
-        File::create(&path).unwrap().write_all(b"{}").unwrap();
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
-        touch_mtime(&path, now - Duration::from_secs(300));
+        let now_secs: i64 = 2_000_000_000;
+        let start = rfc3339_from_unix(now_secs - 300);
+        write_transcript(
+            &path,
+            &format!(r#"{{"type":"user","timestamp":"{start}"}}{}"#, "\n"),
+        );
         assert_eq!(
-            session_elapsed(path.to_str().unwrap(), Some(2_000_000_000.0)),
+            session_elapsed(path.to_str().unwrap(), Some(now_secs as f64)),
             "5m"
         );
     }
+
     #[test]
     fn two_hours_two_minutes_old() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("t.jsonl");
-        File::create(&path).unwrap().write_all(b"{}").unwrap();
         let now_secs: i64 = 2_000_000_000;
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs as u64);
-        touch_mtime(&path, now - Duration::from_secs(7320));
+        let start = rfc3339_from_unix(now_secs - 7320);
+        write_transcript(
+            &path,
+            &format!(r#"{{"type":"user","timestamp":"{start}"}}{}"#, "\n"),
+        );
         assert_eq!(
             session_elapsed(path.to_str().unwrap(), Some(now_secs as f64)),
             "2h2m"
+        );
+    }
+
+    #[test]
+    fn prelude_records_without_timestamp_are_skipped() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let now_secs: i64 = 2_000_000_000;
+        let start = rfc3339_from_unix(now_secs - 600);
+        let body = format!(
+            r#"{{"type":"mode","mode":"normal","sessionId":"abc"}}
+{{"type":"permission-mode","permissionMode":"default","sessionId":"abc"}}
+{{"type":"file-history-snapshot","messageId":"m","snapshot":{{}},"isSnapshotUpdate":false}}
+{{"type":"user","timestamp":"{start}"}}
+"#
+        );
+        write_transcript(&path, &body);
+        assert_eq!(
+            session_elapsed(path.to_str().unwrap(), Some(now_secs as f64)),
+            "10m"
+        );
+    }
+
+    #[test]
+    fn malformed_leading_line_is_skipped() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let now_secs: i64 = 2_000_000_000;
+        let start = rfc3339_from_unix(now_secs - 60);
+        let body = format!("this is not json\n{{\"type\":\"user\",\"timestamp\":\"{start}\"}}\n");
+        write_transcript(&path, &body);
+        assert_eq!(
+            session_elapsed(path.to_str().unwrap(), Some(now_secs as f64)),
+            "1m"
+        );
+    }
+
+    #[test]
+    fn no_timestamped_records_returns_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        write_transcript(
+            &path,
+            "{\"type\":\"mode\",\"mode\":\"normal\"}\n{\"type\":\"permission-mode\"}\n",
+        );
+        assert_eq!(
+            session_elapsed(path.to_str().unwrap(), Some(2_000_000_000.0)),
+            ""
+        );
+    }
+
+    #[test]
+    fn future_timestamp_clamps_to_zero() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let now_secs: i64 = 2_000_000_000;
+        let start = rfc3339_from_unix(now_secs + 30);
+        write_transcript(
+            &path,
+            &format!(r#"{{"type":"user","timestamp":"{start}"}}{}"#, "\n"),
+        );
+        assert_eq!(
+            session_elapsed(path.to_str().unwrap(), Some(now_secs as f64)),
+            "0m"
         );
     }
 
