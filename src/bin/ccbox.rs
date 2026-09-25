@@ -5,8 +5,8 @@ use std::process::ExitCode;
 
 use ccbox::{
     config::{
-        parse_bool_tristate, parse_density, parse_tasks_view, resolve_row_visibility, Density,
-        Env, RowVisibilitySource, TasksView,
+        parse_bool_tristate, parse_density, parse_tasks_view, resolve_row_visibility, Density, Env,
+        RowVisibilitySource, TasksView,
     },
     consts::{DEFAULT_MAX_WIDTH, MIN_WIDTH},
     input::session::SessionInfo,
@@ -194,8 +194,12 @@ fn run_hook() -> ExitCode {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
-        let owner = ccbox::data::waiting::owner_pid();
-        ccbox::data::waiting::apply_hook(&resolve_claude_dir(), &input, now, owner);
+        ccbox::data::waiting::apply_hook(
+            &resolve_claude_dir(),
+            &input,
+            now,
+            ccbox::data::waiting::owner_pid,
+        );
     }
     ExitCode::SUCCESS
 }
@@ -235,7 +239,14 @@ fn run_toggle(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("show") => apply_set(&claude_dir, current, args.get(1), Some(true)),
         Some("hide") => apply_set(&claude_dir, current, args.get(1), Some(false)),
-        Some("flip") => apply_flip(&claude_dir, current, args.get(1), env_tasks, env_subs, density),
+        Some("flip") => apply_flip(
+            &claude_dir,
+            current,
+            args.get(1),
+            env_tasks,
+            env_subs,
+            density,
+        ),
         Some("status") => print_status(&current, env_tasks, env_subs, density),
         Some(other) => {
             eprintln!("ccbox toggle: unknown subcommand: {other}");
@@ -473,8 +484,7 @@ mod toggle_tests {
         let dir = tempdir().unwrap();
         let current = toggles::load(dir.path());
         // Minimal density: includes_tasks() == false → effective=false → flip writes true.
-        let effective_minimal =
-            effective_value(&current, Row::Tasks, None, None, Density::Minimal);
+        let effective_minimal = effective_value(&current, Row::Tasks, None, None, Density::Minimal);
         assert!(!effective_minimal);
         // Standard density: includes_tasks() == true → effective=true → flip writes false.
         let effective_standard =

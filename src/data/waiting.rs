@@ -1,8 +1,10 @@
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::data::iso::parse_iso_to_epoch;
 use crate::data::session_name;
 
 const STALE_SECS: f64 = 24.0 * 3600.0;
@@ -38,6 +40,10 @@ pub struct Marker {
     pub pid: Option<u32>,
     #[serde(default)]
     pub transcript_path: String,
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub tool_use_id: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -54,10 +60,15 @@ pub struct HookInput {
     pub transcript_path: String,
     #[serde(default)]
     pub cwd: String,
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub tool_use_id: String,
 }
 
 enum Action {
     Set(Kind),
+    ToolDone,
     Clear,
     Ignore,
 }
@@ -70,7 +81,8 @@ fn action(h: &HookInput) -> Action {
         }
         ("Notification", "idle_prompt") => Action::Set(Kind::YourTurn),
         ("PreToolUse", _) if h.tool_name == "AskUserQuestion" => Action::Set(Kind::Question),
-        ("PostToolUse" | "UserPromptSubmit" | "Stop" | "SessionEnd", _) => Action::Clear,
+        ("PostToolUse", _) => Action::ToolDone,
+        ("UserPromptSubmit" | "Stop" | "SessionEnd", _) => Action::Clear,
         _ => Action::Ignore,
     }
 }
@@ -107,12 +119,39 @@ fn owner_alive(m: &Marker) -> bool {
     m.pid.map_or(true, process_alive)
 }
 
+/// Only a conversation record (`user`/`assistant`) written after the prompt
+/// counts: Claude Code also appends metadata records while a prompt waits.
 fn moved_on(m: &Marker) -> bool {
-    let mtime = fs::metadata(&m.transcript_path)
+    const TAIL_BYTES: u64 = 64 * 1024;
+    let cutoff = m.since + ACTIVITY_GRACE_SECS;
+    let Ok(mut f) = fs::File::open(&m.transcript_path) else {
+        return false;
+    };
+    let fresh = f
+        .metadata()
         .and_then(|md| md.modified())
         .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
-    mtime.is_some_and(|t| t.as_secs_f64() > m.since + ACTIVITY_GRACE_SECS)
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|t| t.as_secs_f64() > cutoff);
+    if !fresh {
+        return false;
+    }
+    let len = f.metadata().map(|md| md.len()).unwrap_or(0);
+    let mut tail = String::new();
+    if f.seek(SeekFrom::Start(len.saturating_sub(TAIL_BYTES)))
+        .is_err()
+        || f.read_to_string(&mut tail).is_err()
+    {
+        return false;
+    }
+    tail.lines().rev().any(|ln| {
+        let is_turn = ln.contains(r#""type":"user""#) || ln.contains(r#""type":"assistant""#);
+        is_turn
+            && serde_json::from_str::<serde_json::Value>(ln)
+                .ok()
+                .and_then(|v| v.get("timestamp")?.as_str().map(parse_iso_to_epoch))
+                .is_some_and(|ts| ts > cutoff)
+    })
 }
 
 #[cfg(unix)]
@@ -166,7 +205,12 @@ fn read(path: &Path) -> Option<Marker> {
 }
 
 /// Errors are swallowed: a hook must never fail the session it runs in.
-pub fn apply_hook(claude_dir: &Path, h: &HookInput, now: f64, owner_pid: Option<u32>) {
+pub fn apply_hook(
+    claude_dir: &Path,
+    h: &HookInput,
+    now: f64,
+    owner_pid: impl FnOnce() -> Option<u32>,
+) {
     let Some(path) = marker_path(claude_dir, &h.session_id) else {
         return;
     };
@@ -174,6 +218,15 @@ pub fn apply_hook(claude_dir: &Path, h: &HookInput, now: f64, owner_pid: Option<
         Action::Ignore => {}
         Action::Clear => {
             let _ = fs::remove_file(&path);
+        }
+        Action::ToolDone => {
+            let finishes_marker = read(&path).is_some_and(|m| {
+                m.agent_id == h.agent_id
+                    && (m.tool_use_id.is_empty() || m.tool_use_id == h.tool_use_id)
+            });
+            if finishes_marker {
+                let _ = fs::remove_file(&path);
+            }
         }
         Action::Set(kind) => {
             let prev = read(&path);
@@ -185,8 +238,14 @@ pub fn apply_hook(claude_dir: &Path, h: &HookInput, now: f64, owner_pid: Option<
                 kind,
                 since,
                 name: display_name(h),
-                pid: owner_pid,
+                pid: owner_pid(),
                 transcript_path: h.transcript_path.clone(),
+                agent_id: h.agent_id.clone(),
+                tool_use_id: if h.hook_event_name == "PreToolUse" {
+                    h.tool_use_id.clone()
+                } else {
+                    String::new()
+                },
             };
             let _ = fs::create_dir_all(dir(claude_dir));
             if let Ok(body) = serde_json::to_string(&marker) {
@@ -231,6 +290,7 @@ pub fn load_all(claude_dir: &Path, now: f64) -> Vec<(String, Marker)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use tempfile::tempdir;
 
     fn hook(event: &str, notif: &str, tool: &str, sid: &str) -> HookInput {
@@ -241,6 +301,8 @@ mod tests {
             tool_name: tool.into(),
             transcript_path: String::new(),
             cwd: "/home/u/api-fix".into(),
+            agent_id: String::new(),
+            tool_use_id: String::new(),
         }
     }
 
@@ -251,7 +313,7 @@ mod tests {
             d.path(),
             &hook("Notification", "permission_prompt", "", "s1"),
             10.0,
-            None,
+            || None,
         );
         let all = load_all(d.path(), 20.0);
         assert_eq!(all.len(), 1);
@@ -259,20 +321,30 @@ mod tests {
         assert_eq!(all[0].1.kind, Kind::Permission);
         assert_eq!(all[0].1.name, "api-fix s1");
 
-        apply_hook(d.path(), &hook("PostToolUse", "", "Bash", "s1"), 30.0, None);
+        apply_hook(
+            d.path(),
+            &hook("PostToolUse", "", "Bash", "s1"),
+            30.0,
+            || None,
+        );
         assert!(load_all(d.path(), 40.0).is_empty());
     }
 
     #[test]
     fn ask_user_question_counts_as_question() {
         let d = tempdir().unwrap();
-        apply_hook(d.path(), &hook("PreToolUse", "", "Bash", "s1"), 10.0, None);
+        apply_hook(
+            d.path(),
+            &hook("PreToolUse", "", "Bash", "s1"),
+            10.0,
+            || None,
+        );
         assert!(load_all(d.path(), 11.0).is_empty());
         apply_hook(
             d.path(),
             &hook("PreToolUse", "", "AskUserQuestion", "s1"),
             12.0,
-            None,
+            || None,
         );
         assert_eq!(load_all(d.path(), 13.0)[0].1.kind, Kind::Question);
     }
@@ -284,13 +356,13 @@ mod tests {
             d.path(),
             &hook("Notification", "idle_prompt", "", "s1"),
             10.0,
-            None,
+            || None,
         );
         apply_hook(
             d.path(),
             &hook("Notification", "idle_prompt", "", "s1"),
             70.0,
-            None,
+            || None,
         );
         assert_eq!(load_all(d.path(), 80.0)[0].1.since, 10.0);
     }
@@ -302,7 +374,7 @@ mod tests {
             d.path(),
             &hook("Notification", "idle_prompt", "", "s1"),
             0.0,
-            None,
+            || None,
         );
         assert!(load_all(d.path(), STALE_SECS + 1.0).is_empty());
         assert!(fs::read_dir(dir(d.path())).unwrap().next().is_none());
@@ -315,7 +387,7 @@ mod tests {
             d.path(),
             &hook("Notification", "idle_prompt", "", "../x"),
             0.0,
-            None,
+            || None,
         );
         assert!(!dir(d.path()).exists());
     }
@@ -327,13 +399,13 @@ mod tests {
             d.path(),
             &hook("Notification", "idle_prompt", "", "new"),
             50.0,
-            None,
+            || None,
         );
         apply_hook(
             d.path(),
             &hook("Notification", "permission_prompt", "", "old"),
             10.0,
-            None,
+            || None,
         );
         let ids: Vec<String> = load_all(d.path(), 60.0)
             .into_iter()
@@ -352,13 +424,13 @@ mod tests {
             d.path(),
             &hook("Notification", "permission_prompt", "", "gone"),
             10.0,
-            Some(dead),
+            move || Some(dead),
         );
         apply_hook(
             d.path(),
             &hook("Notification", "permission_prompt", "", "live"),
             10.0,
-            Some(std::process::id()),
+            || Some(std::process::id()),
         );
         let ids: Vec<String> = load_all(d.path(), 20.0)
             .into_iter()
@@ -368,26 +440,81 @@ mod tests {
     }
 
     #[test]
-    fn transcript_activity_after_prompt_clears_marker() {
+    fn only_conversation_records_after_the_prompt_count_as_activity() {
+        use chrono::{TimeZone, Utc};
         let d = tempdir().unwrap();
         let t = d.path().join("t.jsonl");
-        fs::write(&t, "{}").unwrap();
-        let written = fs::metadata(&t)
-            .unwrap()
-            .modified()
-            .unwrap()
+        let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
+        let iso = |secs: f64| Utc.timestamp_opt(secs as i64, 0).unwrap().to_rfc3339();
+        let since = now - 60.0;
+        fs::write(
+            &t,
+            format!(
+                "{{\"type\":\"assistant\",\"timestamp\":\"{}\"}}\n\
+                 {{\"type\":\"ai-title\",\"timestamp\":\"{}\"}}\n\
+                 {{\"type\":\"queue-operation\",\"timestamp\":\"{}\"}}\n",
+                iso(since - 1.0),
+                iso(since + 20.0),
+                iso(since + 40.0),
+            ),
+        )
+        .unwrap();
         let mut h = hook("Notification", "permission_prompt", "", "s1");
         h.transcript_path = t.to_string_lossy().into();
+        apply_hook(d.path(), &h, since, || None);
+        assert_eq!(
+            load_all(d.path(), now).len(),
+            1,
+            "metadata alone is not activity"
+        );
 
-        apply_hook(d.path(), &h, written - 1.0, None);
-        assert_eq!(load_all(d.path(), written + 60.0).len(), 1, "within grace");
+        let mut f = fs::OpenOptions::new().append(true).open(&t).unwrap();
+        writeln!(
+            f,
+            "{{\"type\":\"user\",\"timestamp\":\"{}\"}}",
+            iso(since + 50.0)
+        )
+        .unwrap();
+        assert!(load_all(d.path(), now).is_empty(), "a later user turn is");
+    }
 
-        apply_hook(d.path(), &hook("Stop", "", "", "s1"), 0.0, None);
-        apply_hook(d.path(), &h, written - 30.0, None);
-        assert!(load_all(d.path(), written + 60.0).is_empty(), "moved on");
+    #[test]
+    fn tool_completion_clears_only_its_own_marker() {
+        let d = tempdir().unwrap();
+        let mut ask = hook("PreToolUse", "", "AskUserQuestion", "s1");
+        ask.tool_use_id = "toolu_ask".into();
+        apply_hook(d.path(), &ask, 10.0, || None);
+
+        let mut other = hook("PostToolUse", "", "Read", "s1");
+        other.tool_use_id = "toolu_read".into();
+        apply_hook(d.path(), &other, 11.0, || None);
+        assert_eq!(load_all(d.path(), 12.0).len(), 1, "parallel tool finishing");
+
+        let mut sub = hook("Notification", "permission_prompt", "", "s2");
+        sub.agent_id = "agent-1".into();
+        apply_hook(d.path(), &sub, 10.0, || None);
+        apply_hook(
+            d.path(),
+            &hook("PostToolUse", "", "Bash", "s2"),
+            11.0,
+            || None,
+        );
+        assert_eq!(
+            load_all(d.path(), 12.0).len(),
+            2,
+            "main thread tool vs subagent prompt"
+        );
+
+        let mut answered = hook("PostToolUse", "", "AskUserQuestion", "s1");
+        answered.tool_use_id = "toolu_ask".into();
+        apply_hook(d.path(), &answered, 13.0, || None);
+        let mut sub_done = hook("PostToolUse", "", "Bash", "s2");
+        sub_done.agent_id = "agent-1".into();
+        apply_hook(d.path(), &sub_done, 13.0, || None);
+        assert!(load_all(d.path(), 14.0).is_empty());
     }
 
     #[test]
@@ -397,13 +524,13 @@ mod tests {
             d.path(),
             &hook("Notification", "idle_prompt", "", "idle"),
             0.0,
-            None,
+            || None,
         );
         apply_hook(
             d.path(),
             &hook("Notification", "permission_prompt", "", "perm"),
             0.0,
-            None,
+            || None,
         );
         let ids = |now| -> Vec<String> {
             load_all(d.path(), now)

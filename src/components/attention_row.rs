@@ -13,6 +13,8 @@ const REVERSE: &str = "\x1b[7m";
 pub struct AttentionRow;
 pub static ATTENTION_ROW: AttentionRow = AttentionRow;
 
+/// Tries progressively shorter forms until one fits `available`: the full
+/// list, a `+N waiting` count, this session's status alone, the bare badge.
 pub fn attention_line(
     r: &Renderer,
     own: Option<&Marker>,
@@ -22,36 +24,44 @@ pub fn attention_line(
 ) -> String {
     let t = r.theme;
     let ago = |m: &Marker| fmt_reset((now - m.since) as i64);
-    let mut line = String::from(" ");
-    if let Some(m) = own {
-        if m.kind == Kind::YourTurn {
-            line.push_str(&format!("{}⏸ your turn {}{RESET}", t.label, ago(m)));
-        } else {
-            line.push_str(&format!(
+    let (own_full, own_short) = match own {
+        Some(m) if m.kind == Kind::YourTurn => (
+            format!("{}⏸ your turn {}{RESET}", t.label, ago(m)),
+            format!("{}⏸ your turn{RESET}", t.label),
+        ),
+        Some(m) => (
+            format!(
                 "{}{BOLD}{REVERSE} ⏸ NEEDS YOU {RESET} {}{}{RESET} {}{}{RESET}",
                 t.alert,
                 t.alert,
                 m.kind.label(),
                 t.label,
                 ago(m),
-            ));
-        }
-    }
+            ),
+            format!("{}{BOLD}{REVERSE} ⏸ NEEDS YOU {RESET}", t.alert),
+        ),
+        None => (String::new(), String::new()),
+    };
+    let join = |a: &str, b: &str| match (a.is_empty(), b.is_empty()) {
+        (true, _) => format!(" {b}"),
+        (_, true) => format!(" {a}"),
+        _ => format!(" {a}   {b}"),
+    };
+    let fits = |line: &str| visible_width(line) <= available;
+
+    let mut candidates = Vec::new();
     if !others.is_empty() {
-        if own.is_some() {
-            line.push_str("   ");
-        }
         let lead = if own.is_some() {
             "also waiting:"
         } else {
             "⏸ waiting:"
         };
-        line.push_str(&format!("{}{lead}{RESET}", t.label));
+        let mut list = format!("{}{lead}{RESET}", t.label);
         for (i, m) in others.iter().enumerate() {
             let sep = if i == 0 {
-                " "
+                " ".to_string()
             } else {
-                &format!(" {}·{RESET} ", t.label)
+                format!(" {}·{RESET} ", t.label)
             };
             let (clr, weight) = if m.kind == Kind::YourTurn {
                 (t.label, "")
@@ -66,18 +76,34 @@ pub fn attention_line(
                 ago(m),
             );
             let rest = others.len() - i - 1;
-            let more = if rest > 0 {
-                format!(" {}+{rest} more{RESET}", t.label)
-            } else {
-                String::new()
-            };
-            if visible_width(&line) + visible_width(&item) + visible_width(&more) > available {
-                line.push_str(&format!(" {}+{} more{RESET}", t.label, others.len() - i));
+            let more = |n: usize| format!(" {}+{n} more{RESET}", t.label);
+            let tail = if rest > 0 { more(rest) } else { String::new() };
+            if !fits(&join(&own_full, &format!("{list}{item}{tail}"))) {
+                if i > 0 {
+                    list.push_str(&more(others.len() - i));
+                    candidates.push(join(&own_full, &list));
+                }
+                list.clear();
                 break;
             }
-            line.push_str(&item);
+            list.push_str(&item);
         }
+        if !list.is_empty() {
+            candidates.push(join(&own_full, &list));
+        }
+        let count = if own.is_some() {
+            format!("{}+{} waiting{RESET}", t.label, others.len())
+        } else {
+            format!("{}⏸ {} waiting{RESET}", t.label, others.len())
+        };
+        candidates.push(join(&own_full, &count));
+        candidates.push(join(&own_short, &count));
     }
+    if own.is_some() {
+        candidates.push(join(&own_full, ""));
+        candidates.push(join(&own_short, ""));
+    }
+    let line = candidates.into_iter().find(|c| fits(c)).unwrap_or_default();
     let pad = available.saturating_sub(visible_width(&line));
     format!("{line}{}", " ".repeat(pad))
 }
@@ -102,7 +128,7 @@ impl Component for AttentionRow {
             .filter(|(sid, _)| *sid != ctx.session.session_id)
             .map(|(_, m)| m)
             .collect();
-        let available = (ctx.width - 2).max(0) as usize;
+        let available = (ctx.width - 3).max(0) as usize;
         ComponentOutput {
             rows: vec![RowSpec::content(attention_line(
                 ctx.renderer,
@@ -130,6 +156,8 @@ mod tests {
             name: name.into(),
             pid: None,
             transcript_path: String::new(),
+            agent_id: String::new(),
+            tool_use_id: String::new(),
         }
     }
 
@@ -167,6 +195,19 @@ mod tests {
             "{s}"
         );
         assert!(s.ends_with("+2 more"), "{s}");
+    }
+
+    #[test]
+    fn narrow_widths_fall_back_to_shorter_forms() {
+        let me = m("me", Kind::Permission, 940.0);
+        let a = m("api-fix-with-a-long-name", Kind::Question, 940.0);
+        assert_eq!(
+            plain(Some(&me), &[&a], 41),
+            "  ⏸ NEEDS YOU  permission 1m   +1 waiting"
+        );
+        assert_eq!(plain(Some(&me), &[&a], 40), "  ⏸ NEEDS YOU    +1 waiting");
+        assert_eq!(plain(Some(&me), &[&a], 26), "  ⏸ NEEDS YOU");
+        assert_eq!(plain(None, &[&a], 20), " ⏸ 1 waiting");
     }
 
     #[test]

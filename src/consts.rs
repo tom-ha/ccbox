@@ -7,6 +7,9 @@ pub const MEDIUM_WIDTH: u16 = 80;
 /// Approximate point at which Claude Code auto-compacts.
 pub const AUTOCOMPACT_RATIO: f64 = 0.75;
 
+/// `resets_at` can wobble between calls within one window.
+pub const RESETS_AT_TOLERANCE_SECS: i64 = 600;
+
 pub const FIVE_HOUR_MINUTES: u32 = 300;
 pub const SEVEN_DAY_MINUTES: u32 = 10_080;
 pub const FIVE_HOUR_WARMUP_MINUTES: u32 = 5;

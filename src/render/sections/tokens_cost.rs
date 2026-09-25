@@ -170,6 +170,12 @@ where
     }
 }
 
+/// Rounds the forecast down so it can never land after the reset it beats.
+fn floor_to_quarter_hour(now: f64, secs: i64) -> i64 {
+    let at = now as i64 + secs;
+    (at - at.rem_euclid(900) - now as i64).max(0)
+}
+
 fn fmt_clock(now: f64, secs: i64, round_min: i64) -> String {
     fmt_clock_in(&Local, now, secs, round_min)
 }
@@ -233,7 +239,7 @@ impl Renderer {
             out.push_str(&format!(
                 " {}maxed at ~{}{RESET}",
                 t.alert,
-                fmt_clock(l.now, secs, 15)
+                fmt_clock(l.now, floor_to_quarter_hour(l.now, secs), 1)
             ));
         }
         if let Some(secs) = l.resets_in_secs.filter(|_| show_reset) {
@@ -413,6 +419,16 @@ mod tests {
         assert_eq!(f(24 * 3600 + 60, 1), "Fri 10:01am");
         assert_eq!(f(3 * 86_400 + 23 * 3600, 1), "Mon 9am");
         assert_eq!(f(19 * 3600 + 8 * 60, 15), "5:15am");
+    }
+
+    #[test]
+    fn forecast_rounds_down_so_it_never_passes_the_reset() {
+        use chrono::Utc;
+        // 2026-09-24 (Thu) 10:00 UTC; forecast 11:38, reset 11:40.
+        let now = 1_790_244_000.0;
+        let secs = floor_to_quarter_hour(now, 98 * 60);
+        assert_eq!(fmt_clock_in(&Utc, now, secs, 1), "11:30am");
+        assert_eq!(fmt_clock_in(&Utc, now, 100 * 60, 1), "11:40am");
     }
 
     #[test]

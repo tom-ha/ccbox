@@ -86,7 +86,13 @@ data["statusLine"] = {"type": "command", "command": ccbox, "refreshInterval": 5}
 # re-running the installer stays idempotent; other hooks are left alone.
 hook_cmd = f"{shlex.quote(ccbox)} hook"
 def is_ccbox_hook(h):
-    return isinstance(h, dict) and str(h.get("command", "")).endswith("ccbox hook")
+    if not isinstance(h, dict):
+        return False
+    try:
+        toks = shlex.split(str(h.get("command", "")))
+    except ValueError:
+        return False
+    return len(toks) >= 2 and toks[-1] == "hook" and pathlib.PurePosixPath(toks[-2]).name == "ccbox"
 wanted = {
     "Notification": [""],
     "PreToolUse": ["AskUserQuestion"],
@@ -96,10 +102,17 @@ wanted = {
     "SessionEnd": [""],
 }
 hooks = data.setdefault("hooks", {})
+if not isinstance(hooks, dict):
+    sys.exit(f"==> settings.json 'hooks' is not an object; not touching it")
 for event, matchers in wanted.items():
+    existing = hooks.get(event, [])
+    if not isinstance(existing, list):
+        print(f"==> hooks.{event} is not a list; leaving it alone (no ccbox hook added)")
+        continue
     groups = [
-        g for g in hooks.get(event, [])
-        if not (isinstance(g, dict) and g.get("hooks") and all(map(is_ccbox_hook, g["hooks"])))
+        g for g in existing
+        if not (isinstance(g, dict) and isinstance(g.get("hooks"), list) and g["hooks"]
+                and all(map(is_ccbox_hook, g["hooks"])))
     ]
     for m in matchers:
         groups.append({"matcher": m, "hooks": [{"type": "command", "command": hook_cmd}]})

@@ -3,11 +3,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::consts::RESETS_AT_TOLERANCE_SECS;
+
 use crate::input::session::RateBucket;
 
 const MAX_SAMPLES: usize = 3_000;
-/// `resets_at` can wobble between calls within one window.
-const SAME_WINDOW_TOLERANCE_SECS: i64 = 600;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct History {
@@ -38,7 +38,7 @@ pub fn record(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    if (h.resets_at - bucket.resets_at).abs() > SAME_WINDOW_TOLERANCE_SECS {
+    if (h.resets_at - bucket.resets_at).abs() > RESETS_AT_TOLERANCE_SECS {
         h = History::default();
     }
     h.resets_at = bucket.resets_at;

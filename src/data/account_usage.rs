@@ -13,6 +13,7 @@ use crate::data::iso::parse_iso_to_epoch;
 pub const REFRESH_SECS: f64 = 300.0;
 const MAX_AGE_SECS: f64 = 3600.0;
 const LOCK_STALE_SECS: f64 = 120.0;
+const MAX_BACKOFF_SECS: f64 = 6.0 * 3600.0;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +45,42 @@ fn lock_path(claude_dir: &Path) -> PathBuf {
     claude_dir.join("ccbox-cache").join("account-usage.lock")
 }
 
+fn attempt_path(claude_dir: &Path) -> PathBuf {
+    claude_dir
+        .join("ccbox-cache")
+        .join("account-usage-attempt.json")
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Attempt {
+    at: f64,
+    failures: u32,
+}
+
+fn read_attempt(claude_dir: &Path) -> Attempt {
+    fs::read_to_string(attempt_path(claude_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_attempt(claude_dir: &Path, a: &Attempt) {
+    let path = attempt_path(claude_dir);
+    let _ = fs::create_dir_all(path.parent().unwrap_or(claude_dir));
+    if let Ok(body) = serde_json::to_string(a) {
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        if fs::write(&tmp, body).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
+}
+
+/// Failed refreshes back off exponentially, so an unusable `claude` doesn't
+/// get relaunched on every render.
+fn backoff_secs(failures: u32) -> f64 {
+    (REFRESH_SECS * 2f64.powi(failures.min(16) as i32)).min(MAX_BACKOFF_SECS)
+}
+
 fn mtime_secs(path: &Path) -> Option<f64> {
     let t = fs::metadata(path).ok()?.modified().ok()?;
     Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64())
@@ -58,18 +95,26 @@ pub fn load(claude_dir: &Path, now: f64) -> Option<AccountUsage> {
         .as_ref()
         .map_or(f64::INFINITY, |c| now - c.fetched_at);
     let refreshing = mtime_secs(&lock_path(claude_dir)).is_some_and(|t| now - t < LOCK_STALE_SECS);
-    if age >= REFRESH_SECS && !refreshing {
-        spawn_refresh();
+    let attempt = read_attempt(claude_dir);
+    let due = age >= REFRESH_SECS && now - attempt.at >= backoff_secs(attempt.failures);
+    if due && !refreshing && spawn_refresh() {
+        write_attempt(
+            claude_dir,
+            &Attempt {
+                at: now,
+                failures: attempt.failures,
+            },
+        );
     }
     cached.filter(|_| age < MAX_AGE_SECS)
 }
 
-fn spawn_refresh() {
+fn spawn_refresh() -> bool {
     let Ok(exe) = std::env::current_exe() else {
-        return;
+        return false;
     };
     if exe.file_stem().and_then(|s| s.to_str()) != Some("ccbox") {
-        return;
+        return false;
     }
     let mut cmd = Command::new(exe);
     cmd.arg("usage-refresh")
@@ -81,7 +126,7 @@ fn spawn_refresh() {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let _ = cmd.spawn();
+    cmd.spawn().is_ok()
 }
 
 pub fn refresh(claude_dir: &Path, now: f64) {
@@ -99,13 +144,17 @@ pub fn refresh(claude_dir: &Path, now: f64) {
     {
         return;
     }
-    if let Some(usage) = probe().and_then(|v| parse_usage(&v, now)) {
-        if let Ok(body) = serde_json::to_string(&usage) {
-            let path = cache_path(claude_dir);
-            let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-            if fs::write(&tmp, body).is_ok() {
-                let _ = fs::rename(&tmp, &path);
-            }
+    let usage = probe().and_then(|v| parse_usage(&v, now));
+    let failures = match &usage {
+        Some(_) => 0,
+        None => read_attempt(claude_dir).failures.saturating_add(1),
+    };
+    write_attempt(claude_dir, &Attempt { at: now, failures });
+    if let Some(body) = usage.and_then(|u| serde_json::to_string(&u).ok()) {
+        let path = cache_path(claude_dir);
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        if fs::write(&tmp, body).is_ok() {
+            let _ = fs::rename(&tmp, &path);
         }
     }
     let _ = fs::remove_file(&lock);
@@ -252,5 +301,13 @@ mod tests {
         fs::write(cache_path(d.path()), serde_json::to_string(&u).unwrap()).unwrap();
         assert!(load(d.path(), 1_000_000.0 + 10.0).is_some());
         assert!(load(d.path(), 1_000_000.0 + MAX_AGE_SECS + 1.0).is_none());
+    }
+
+    #[test]
+    fn backoff_doubles_and_caps() {
+        assert_eq!(backoff_secs(0), REFRESH_SECS);
+        assert_eq!(backoff_secs(1), 2.0 * REFRESH_SECS);
+        assert_eq!(backoff_secs(3), 8.0 * REFRESH_SECS);
+        assert_eq!(backoff_secs(40), MAX_BACKOFF_SECS);
     }
 }

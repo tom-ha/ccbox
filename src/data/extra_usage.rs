@@ -1,20 +1,31 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::consts::RESETS_AT_TOLERANCE_SECS;
+
 use crate::input::session::RateLimits;
 
+/// One file per session, so concurrent sessions never overwrite each other.
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct Ledger {
+struct Entry {
     window_resets_at: i64,
-    /// session id → (cost when first seen over the limit, latest cost).
-    sessions: HashMap<String, (f64, f64)>,
+    /// Cost when this session was first seen over the limit.
+    base: f64,
+    last: f64,
 }
 
-fn ledger_path(claude_dir: &Path) -> PathBuf {
-    claude_dir.join("ccbox-cache").join("extra-usage.json")
+fn ledger_dir(claude_dir: &Path) -> PathBuf {
+    claude_dir.join("ccbox-cache").join("extra-usage")
+}
+
+fn read_entry(path: &Path) -> Option<Entry> {
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+fn same_window(a: i64, b: i64) -> bool {
+    (a - b).abs() <= RESETS_AT_TOLERANCE_SECS
 }
 
 pub fn exhausted_window(rl: &RateLimits) -> Option<i64> {
@@ -34,44 +45,52 @@ pub fn update(
     session_cost: f64,
 ) -> Option<f64> {
     let window = exhausted_window(rate_limits)?;
-    if session_id.is_empty() {
+    let safe = !session_id.is_empty()
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !safe {
         return None;
     }
-    let path = ledger_path(claude_dir);
-    let mut ledger: Ledger = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    if ledger.window_resets_at != window {
-        ledger = Ledger {
+    let dir = ledger_dir(claude_dir);
+    let path = dir.join(format!("{session_id}.json"));
+    let mut entry = read_entry(&path)
+        .filter(|e| same_window(e.window_resets_at, window))
+        .unwrap_or(Entry {
             window_resets_at: window,
-            ..Default::default()
-        };
-    }
-    let entry = ledger
-        .sessions
-        .entry(session_id.to_string())
-        .or_insert((session_cost, session_cost));
-    if session_cost < entry.0 {
-        entry.0 = session_cost;
-    }
-    entry.1 = session_cost;
-
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(body) = serde_json::to_string(&ledger) {
+            base: session_cost,
+            last: session_cost,
+        });
+    entry.base = entry.base.min(session_cost);
+    entry.last = session_cost;
+    let _ = fs::create_dir_all(&dir);
+    if let Ok(body) = serde_json::to_string(&entry) {
         let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         if fs::write(&tmp, body).is_ok() {
             let _ = fs::rename(&tmp, &path);
         }
     }
 
-    let spent: f64 = ledger
-        .sessions
-        .values()
-        .map(|(base, last)| last - base)
-        .sum();
+    let mut spent = 0.0;
+    for e in fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+    {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        match read_entry(&p) {
+            Some(other) if same_window(other.window_resets_at, window) => {
+                spent += other.last - other.base;
+            }
+            Some(other) if other.window_resets_at < window - RESETS_AT_TOLERANCE_SECS => {
+                let _ = fs::remove_file(&p);
+            }
+            _ => {}
+        }
+    }
     (spent >= 0.005).then_some(spent)
 }
 
@@ -98,7 +117,7 @@ mod tests {
     fn within_limits_shows_nothing_and_writes_nothing() {
         let dir = tempdir().unwrap();
         assert_eq!(update(dir.path(), "s1", &limits(99.0, 50.0), 4.0), None);
-        assert!(!ledger_path(dir.path()).exists());
+        assert!(!ledger_dir(dir.path()).exists());
     }
 
     #[test]
@@ -136,5 +155,23 @@ mod tests {
         assert_eq!(exhausted_window(&limits(100.0, 100.0)), Some(9_000));
         assert_eq!(exhausted_window(&limits(40.0, 100.0)), Some(9_000));
         assert_eq!(exhausted_window(&limits(40.0, 99.9)), None);
+    }
+
+    #[test]
+    fn wobbling_resets_at_keeps_the_ledger() {
+        let dir = tempdir().unwrap();
+        update(dir.path(), "s1", &limits(100.0, 50.0), 1.0);
+        update(dir.path(), "s1", &limits(100.0, 50.0), 3.0);
+        let mut wobbled = limits(100.0, 50.0);
+        wobbled.five_hour.resets_at += 120;
+        let spent = update(dir.path(), "s1", &wobbled, 4.0).unwrap();
+        assert!((spent - 3.0).abs() < 1e-9, "{spent}");
+    }
+
+    #[test]
+    fn unsafe_session_ids_are_ignored() {
+        let dir = tempdir().unwrap();
+        assert_eq!(update(dir.path(), "../x", &limits(100.0, 50.0), 1.0), None);
+        assert!(!ledger_dir(dir.path()).exists());
     }
 }

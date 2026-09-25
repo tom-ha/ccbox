@@ -58,19 +58,39 @@ fn usage_limit(
     })
 }
 
+fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
 const SESSION_LOOKBACK_SECS: f64 = 30.0 * 60.0;
 const WEEKLY_LOOKBACK_SECS: f64 = 24.0 * 3600.0;
 
+/// `sampled_at` is when the reading was taken, which for cached account data
+/// can be well before this render.
 fn with_history(
     ctx: &ComponentContext,
     mut l: UsageLimit,
     series: &str,
     bucket: &RateBucket,
     min_gap_secs: f64,
+    sampled_at: f64,
 ) -> UsageLimit {
     if let Some(trend) = l.trend.as_mut() {
-        trend.samples =
-            limit_history::record(&ctx.env.claude_dir, series, bucket, min_gap_secs, ctx.now);
+        trend.samples = limit_history::record(
+            &ctx.env.claude_dir,
+            series,
+            bucket,
+            min_gap_secs,
+            sampled_at,
+        );
         if let Some(&(_, latest)) = trend.samples.last() {
             l.used_pct = l.used_pct.max(latest);
         }
@@ -87,12 +107,12 @@ pub fn usage_limits(ctx: &ComponentContext) -> Vec<UsageLimit> {
         FIVE_HOUR_WARMUP_MINUTES,
         ctx.now,
     )
-    .map(|l| with_history(ctx, l, "five-hour", &rl.five_hour, 30.0));
-    let model_limits = ctx
-        .data
-        .account_usage(ctx)
+    .map(|l| with_history(ctx, l, "five-hour", &rl.five_hour, 30.0, ctx.now));
+    let account = ctx.data.account_usage(ctx);
+    let model_limits = account
         .map(|u| u.model_limits.as_slice())
         .unwrap_or_default();
+    let fetched_at = account.map_or(ctx.now, |u| u.fetched_at);
     [
         session,
         usage_limit(
@@ -102,7 +122,7 @@ pub fn usage_limits(ctx: &ComponentContext) -> Vec<UsageLimit> {
             SEVEN_DAY_WARMUP_MINUTES,
             ctx.now,
         )
-        .map(|l| with_history(ctx, l, "seven-day", &rl.seven_day, 300.0)),
+        .map(|l| with_history(ctx, l, "seven-day", &rl.seven_day, 300.0, ctx.now)),
     ]
     .into_iter()
     .flatten()
@@ -111,7 +131,7 @@ pub fn usage_limits(ctx: &ComponentContext) -> Vec<UsageLimit> {
             used_percentage: m.used_pct,
             resets_at: m.resets_at,
         };
-        let series = format!("model-{}", m.name.to_ascii_lowercase());
+        let series = format!("model-{}", slug(&m.name));
         usage_limit(
             &m.name,
             &bucket,
@@ -119,7 +139,7 @@ pub fn usage_limits(ctx: &ComponentContext) -> Vec<UsageLimit> {
             SEVEN_DAY_WARMUP_MINUTES,
             ctx.now,
         )
-        .map(|l| with_history(ctx, l, &series, &bucket, 300.0))
+        .map(|l| with_history(ctx, l, &series, &bucket, 300.0, fetched_at))
     }))
     .collect()
 }
@@ -178,5 +198,17 @@ impl Component for TokensCostRow {
             top_right_chip: String::new(),
             leading_left_chip: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slug;
+
+    #[test]
+    fn model_names_become_file_safe_series() {
+        assert_eq!(slug("Fable"), "fable");
+        assert_eq!(slug("Sonnet 4.5"), "sonnet-4-5");
+        assert_eq!(slug("  Opus/4.7 (1M) "), "opus-4-7-1m");
     }
 }

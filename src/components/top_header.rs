@@ -10,6 +10,36 @@ use super::context::ComponentContext;
 pub struct TopHeader;
 pub static TOP_HEADER: TopHeader = TopHeader;
 
+/// The border drops a chip wider than `width - 2`, so shorten the name, then
+/// drop it, then the id, rather than lose the whole chip.
+fn fit_chip(
+    r: &crate::render::Renderer,
+    width: i32,
+    name: &str,
+    id: &str,
+    elapsed: &str,
+) -> String {
+    let inner = (width - 2).max(0) as usize;
+    let chip = |n: &str, i: &str| session_id_chip(r.theme, n, i, elapsed);
+    let full = chip(name, id);
+    if visible_width(&full) <= inner {
+        return full;
+    }
+    let without_name = chip("", id);
+    let room = inner.saturating_sub(visible_width(&without_name) + 2);
+    if !name.is_empty() && room >= 6 {
+        let short: String = name.chars().take(room - 1).chain(['…']).collect();
+        let shortened = chip(&short, id);
+        if visible_width(&shortened) <= inner {
+            return shortened;
+        }
+    }
+    if visible_width(&without_name) <= inner {
+        return without_name;
+    }
+    chip("", "")
+}
+
 impl Component for TopHeader {
     fn id(&self) -> &'static str {
         "top-header"
@@ -45,7 +75,7 @@ impl Component for TopHeader {
 
         let elapsed = session_elapsed(&session.transcript_path, Some(now));
         let name = ctx.data.session_name(ctx).unwrap_or_default();
-        let top_right_chip = session_id_chip(r.theme, name, &session.session_id, &elapsed);
+        let top_right_chip = fit_chip(r, width, name, &session.session_id, &elapsed);
 
         let content_w = width - 3;
 
@@ -169,5 +199,25 @@ mod tests {
     fn chip_text_non_empty_when_session_id_present() {
         let out = out_for_width(140);
         assert!(!out.top_right_chip.is_empty());
+    }
+
+    #[test]
+    fn long_name_shrinks_before_the_chip_disappears() {
+        let r = Renderer::default();
+        let id = "51e977df-b46f-40d9-82b0-eb9ded60036d";
+        let name = "a-very-long-session-name-that-goes-on";
+        for width in [44, 60, 80, 90, 140] {
+            let chip = fit_chip(&r, width, name, id, "5m");
+            let plain = crate::ansi::strip_ansi(&chip).into_owned();
+            assert!(visible_width(&chip) as i32 <= width - 2, "{width}: {plain}");
+            assert!(plain.contains("5m"), "{width}: {plain}");
+            if width >= 60 {
+                assert!(plain.contains(id), "id kept at {width}: {plain}");
+            }
+        }
+        let wide = crate::ansi::strip_ansi(&fit_chip(&r, 140, name, id, "5m")).into_owned();
+        assert!(wide.contains("a-very-long-session-name-that-g…"), "{wide}");
+        let mid = crate::ansi::strip_ansi(&fit_chip(&r, 60, name, id, "5m")).into_owned();
+        assert!(mid.contains('…'), "shortened at 60: {mid}");
     }
 }
