@@ -771,11 +771,25 @@ mod tests {
     #[test]
     fn latest_exhausted_reset_comes_first() {
         let r = Renderer::default();
-        let line = r.tokens_cost(1, 2, None, &[session(100.0), week(100.0)], None, 50);
-        let plain = strip_ansi(&line).into_owned();
-        let week_at = plain.find("week").unwrap();
-        assert!(plain[week_at..].contains("resets"), "{plain}");
-        assert!(!plain[..week_at].contains("resets"), "{plain}");
+        let ending_week = UsageLimit {
+            resets_in_secs: Some(3600),
+            ..week(100.0)
+        };
+        for (wk, week_reset_first) in [(week(100.0), true), (ending_week, false)] {
+            let line = r.tokens_cost(1, 2, None, &[session(100.0), wk], None, 50);
+            let plain = strip_ansi(&line).into_owned();
+            let week_at = plain.find("week").unwrap();
+            assert_eq!(
+                plain[week_at..].contains("resets"),
+                week_reset_first,
+                "{plain}"
+            );
+            assert_eq!(
+                plain[..week_at].contains("resets"),
+                !week_reset_first,
+                "{plain}"
+            );
+        }
     }
 
     #[test]
