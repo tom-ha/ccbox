@@ -204,17 +204,16 @@ pub fn install(rel: &Release, exe: &Path) -> Result<(), String> {
         )
     })?;
     let dir = exe.parent().ok_or("the binary has no parent directory")?;
-    let mut staging = Staging {
-        path: dir.join(format!(".ccbox-update-{}.tmp", std::process::id())),
-        keep: false,
-    };
-    let mut file = create_staging(&staging.path).map_err(|e| {
+    let path = dir.join(format!(".ccbox-update-{}.tmp", std::process::id()));
+    let unwritable = |e: io::Error| {
         format!(
-            "cannot write to {} ({e}), so {} cannot be replaced. Re-run install.sh with CCBOX_BIN_DIR set to a directory you can write to, or update it with elevated privileges and then run `ccbox update` as yourself to rewire your settings.json",
+            "cannot write to {} ({e}), so {} cannot be replaced. Re-run install.sh with CCBOX_BIN_DIR set to a directory you can write to, or copy the new binary in with elevated privileges and then run `ccbox update` as yourself to rewire your settings.json",
             dir.display(),
             exe.display()
         )
-    })?;
+    };
+    create_staging(&path).map_err(unwritable)?;
+    let _ = fs::remove_file(&path);
 
     let name = release::tarball_name(rel.version, triple);
     let sums_asset = rel.asset("SHA256SUMS").ok_or_else(|| {
@@ -232,6 +231,8 @@ pub fn install(rel: &Release, exe: &Path) -> Result<(), String> {
     let tarball = release::download(&dl, &tar_asset.url)?;
     release::verify_sha256(&tarball, &sums, &name)?;
 
+    let mut staging = Staging { path, keep: false };
+    let mut file = create_staging(&staging.path).map_err(unwritable)?;
     extract_ccbox(&tarball, &mut file).map_err(|e| format!("cannot unpack {name}: {e}"))?;
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);

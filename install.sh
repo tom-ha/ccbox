@@ -89,16 +89,22 @@ install_prebuilt() {
   tar -xzf "$tmp/$TAR_NAME" -C "$tmp" ccbox || { err "$TAR_NAME has no ccbox binary"; return 1; }
   [[ -f "$tmp/ccbox" ]] || { err "$TAR_NAME has no ccbox binary"; return 1; }
   local staged="$BIN_DIR/.ccbox-install.$$"
-  if ! { mkdir -p "$BIN_DIR" && cp "$tmp/ccbox" "$staged" && chmod 0755 "$staged" && mv -f "$staged" "$BIN_DIR/ccbox"; }; then
+  if ! { mkdir -p "$BIN_DIR" && cp "$tmp/ccbox" "$staged" && chmod 0755 "$staged"; }; then
+    rm -f "$staged"
+    err "could not write $BIN_DIR/ccbox; set CCBOX_BIN_DIR to a directory you can write to"
+    return 1
+  fi
+  if [[ "$("$staged" version 2>/dev/null)" != "ccbox ${RELEASE_TAG#v}" ]]; then
+    rm -f "$staged"
+    err "the ccbox in $TAR_NAME does not run here or does not report ccbox ${RELEASE_TAG#v}; not installing"
+    return 1
+  fi
+  if ! mv -f "$staged" "$BIN_DIR/ccbox"; then
     rm -f "$staged"
     err "could not write $BIN_DIR/ccbox; set CCBOX_BIN_DIR to a directory you can write to"
     return 1
   fi
   CCBOX_BIN="$BIN_DIR/ccbox"
-  if [[ "$("$CCBOX_BIN" version 2>/dev/null)" != "ccbox ${RELEASE_TAG#v}" ]]; then
-    err "$CCBOX_BIN does not report ccbox ${RELEASE_TAG#v} after installing"
-    return 1
-  fi
 }
 
 install_from_source() {
@@ -110,6 +116,9 @@ install_from_source() {
   fi
   local root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"
   echo "==> building ccbox from source (this takes a minute)"
+  if [[ -n "${CCBOX_BIN_DIR:-}" ]]; then
+    echo "==> note: CCBOX_BIN_DIR applies to prebuilt installs; cargo installs into $root/bin (set CARGO_INSTALL_ROOT to change that)"
+  fi
   if [[ -n "$LOCAL_SOURCE" ]]; then
     echo "==> source: $LOCAL_SOURCE"
     cargo install --path "$LOCAL_SOURCE" --locked --root "$root"
