@@ -92,6 +92,7 @@ jobs:
         if: matrix.target != 'x86_64-apple-darwin'
         run: |
           tar -xzf "dist/ccbox-$VERSION-$TARGET.tar.gz" -C stage ccbox
+          [ "$(stage/ccbox --version)" = "ccbox $VERSION" ] || { echo "::error::ccbox --version is not ccbox $VERSION"; exit 1; }
           echo '{}' | stage/ccbox --width 80 > /dev/null
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
