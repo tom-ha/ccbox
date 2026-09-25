@@ -1,0 +1,154 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "Cargo.*"
+      - "src/**"
+      - "scripts/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Read the version from Cargo.toml
+        id: version
+        run: |
+          version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $version"
+      - name: Tag, manifests and CHANGELOG agree
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          scripts/check-versions.sh "${TAG#v}"
+          scripts/release-notes.sh "${TAG#v}"
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo test --locked
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the musl toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - run: rustup target add "$TARGET"
+      - run: cargo build --release --locked --target "$TARGET" --bin ccbox
+      - name: Package
+        env:
+          COPYFILE_DISABLE: "1"
+        run: |
+          name="ccbox-$VERSION-$TARGET.tar.gz"
+          mkdir -p dist stage
+          cp "target/$TARGET/release/ccbox" stage/ccbox
+          chmod 0755 stage/ccbox
+          tar -C stage -czf "dist/$name" ccbox
+          listing="$(tar -tvzf "dist/$name")"
+          echo "$listing"
+          [ "$(tar -tzf "dist/$name")" = "ccbox" ] || { echo "::error::$name must hold only ccbox"; exit 1; }
+          case "$listing" in -rwxr-xr-x*) ;; *) echo "::error::ccbox in $name must be mode 0755"; exit 1 ;; esac
+          if command -v sha256sum >/dev/null; then sum=sha256sum; else sum="shasum -a 256"; fi
+          (cd dist && $sum "$name" > "$name.sha256" && cat "$name.sha256")
+      - name: Smoke test
+        run: |
+          tar -xzf "dist/ccbox-$VERSION-$TARGET.tar.gz" -C stage ccbox
+          run=()
+          if [ "$TARGET" = x86_64-apple-darwin ]; then
+            arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license
+            run=(arch -x86_64)
+            file stage/ccbox
+          fi
+          [ "$("${run[@]}" stage/ccbox --version)" = "ccbox $VERSION" ] || { echo "::error::ccbox --version is not ccbox $VERSION"; exit 1; }
+          echo '{}' | "${run[@]}" stage/ccbox --width 80 > /dev/null
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ccbox-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  checksums:
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ccbox-*
+          path: dist
+          merge-multiple: true
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: |
+          cat ./*.tar.gz.sha256 | sort -k2 > SHA256SUMS
+          rm ./*.tar.gz.sha256
+          cat SHA256SUMS
+          [ "$(wc -l < SHA256SUMS)" -eq 4 ] || { echo "::error::SHA256SUMS must have 4 lines"; exit 1; }
+          grep -Evq "^[0-9a-f]{64}  ccbox-$VERSION-[a-z0-9_-]+\.tar\.gz$" SHA256SUMS && { echo "::error::malformed SHA256SUMS line"; exit 1; }
+          sha256sum -c SHA256SUMS
+          ls -l
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [version, test, checksums]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release-notes.sh "${TAG#v}" > notes.md
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md dist/*

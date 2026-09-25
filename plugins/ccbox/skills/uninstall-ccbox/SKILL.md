@@ -27,9 +27,9 @@ Remove ccbox — the Rust statusline for Claude Code — and confirm it is unwir
    curl -fsSL https://raw.githubusercontent.com/tom-ha/ccbox/main/uninstall.sh | bash
    ```
 
-   The script unwires `statusLine` from `settings.json` (only if it currently points at a ccbox binary — a foreign statusline is preserved untouched), removes the `ccbox-subscription` marker and the `ccbox-cache/` directory under `$CLAUDE_CONFIG_DIR` (or `~/.claude`), and runs `cargo uninstall ccbox`. It backs `settings.json` up to a timestamped `.bak` file first.
+   The script unwires `statusLine` and the ccbox hooks from `settings.json` (only a statusline that points at a ccbox binary — a foreign statusline is preserved untouched), removes the `ccbox-subscription` marker and the `ccbox-cache/` directory under `$CLAUDE_CONFIG_DIR` (or `~/.claude`), runs `cargo uninstall ccbox` when cargo is on `PATH`, and deletes a prebuilt `ccbox` from `~/.cargo/bin` (or `$CCBOX_BIN_DIR`, if the user installed there). It backs `settings.json` up to a timestamped `.bak` file first.
 
-3. **Verify the binary is gone.** Run `command -v ccbox`. It MUST NOT resolve. If it still does, surface the path — typically this means ccbox was installed by something other than `cargo install` (e.g. a package manager or a manual copy into `/usr/local/bin`) and the user needs to remove it by hand.
+3. **Verify the binary is gone.** Run `command -v ccbox`. It MUST NOT resolve. If it still does, surface the path — typically this means ccbox lives outside `~/.cargo/bin` (e.g. a manual copy into `/usr/local/bin`, or an install with a different `CCBOX_BIN_DIR`) and the user needs to remove it by hand or re-run the uninstaller with that `CCBOX_BIN_DIR`.
 
 4. **Verify settings.json is clean.** Read `$CLAUDE_CONFIG_DIR/settings.json` (or `~/.claude/settings.json`) and confirm `statusLine.command` no longer points at ccbox. If the field is missing entirely (because the uninstaller stripped the only entry) that is the expected result.
 
@@ -37,6 +37,6 @@ Remove ccbox — the Rust statusline for Claude Code — and confirm it is unwir
 
 ## Notes
 
-- The uninstaller requires `python3` (to edit `settings.json`). `cargo` is only needed if the binary is still installed; the script tolerates its absence.
+- The uninstaller requires `python3` (to edit `settings.json`). `cargo` is only needed when ccbox was built from source; the script tolerates its absence and removes a prebuilt binary without it.
 - If `statusLine.command` does not point at ccbox, the uninstaller leaves it alone and says so — surface that note to the user rather than treating it as a failure.
 - The timestamped `settings.json.bak.*` file is left in place; mention it to the user so they know how to restore the prior config if they change their mind.

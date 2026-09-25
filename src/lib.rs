@@ -9,10 +9,13 @@ pub mod data;
 pub mod glyphs;
 pub mod input;
 pub mod layout;
+pub mod release;
 pub mod render;
+pub mod setup;
 pub mod snapshot;
 pub mod terminal;
 pub mod theme;
+pub mod update;
 pub mod width;
 
 pub use config::Env;
