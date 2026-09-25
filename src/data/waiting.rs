@@ -85,7 +85,10 @@ impl HookInput {
 enum Action {
     Set(Kind),
     ToolDone,
-    Clear,
+    /// Main-thread markers only: a background subagent can still be waiting
+    /// after the main turn ends.
+    ClearMain,
+    ClearAll,
     Ignore,
 }
 
@@ -100,7 +103,8 @@ fn action(h: &HookInput) -> Action {
         ("Notification", "idle_prompt") => Action::Set(Kind::YourTurn),
         ("PreToolUse", _) if h.tool_name == "AskUserQuestion" => Action::Set(Kind::Question),
         ("PostToolUse" | "PostToolUseFailure" | "PermissionDenied", _) => Action::ToolDone,
-        ("UserPromptSubmit" | "Stop" | "SessionEnd", _) => Action::Clear,
+        ("UserPromptSubmit" | "Stop", _) => Action::ClearMain,
+        ("SessionEnd", _) => Action::ClearAll,
         _ => Action::Ignore,
     }
 }
@@ -315,23 +319,30 @@ pub fn apply_hook(
     }
     match action(h) {
         Action::Ignore => {}
-        Action::Clear => {
+        Action::ClearMain => {
+            if let Some(p) = marker_path(claude_dir, &h.session_id, "") {
+                let _ = fs::remove_file(p);
+            }
+        }
+        Action::ClearAll => {
             for p in session_markers(claude_dir, &h.session_id) {
                 let _ = fs::remove_file(p);
             }
         }
         Action::ToolDone => {
-            // The unscoped main marker clears on any completion; a scoped one
-            // only on its own call. An answered AskUserQuestion comes back with
-            // rewritten tool_input, so a known tool_use_id is matched alone.
+            // The unscoped main marker clears on any main-thread completion; a
+            // scoped one only on its own call. An answered AskUserQuestion
+            // comes back with rewritten tool_input, so a known tool_use_id is
+            // matched alone.
             let paths = [
                 marker_path(claude_dir, &h.session_id, ""),
                 marker_path(claude_dir, &h.session_id, &h.agent_id),
             ];
             for path in paths.into_iter().flatten() {
                 let finishes = read(&path).is_some_and(|m| {
-                    !m.scoped
-                        || (m.agent_id == h.agent_id
+                    (!m.scoped && h.agent_id.is_empty())
+                        || (m.scoped
+                            && m.agent_id == h.agent_id
                             && if m.tool_use_id.is_empty() {
                                 m.tool_key.is_empty() || m.tool_key == h.tool_key()
                             } else {
@@ -348,7 +359,10 @@ pub fn apply_hook(
                 h.hook_event_name.as_str(),
                 "PermissionRequest" | "PreToolUse"
             );
-            if !scoped {
+            // Every permission prompt also fires the scoped PermissionRequest,
+            // so its Notification is redundant; other Notifications (e.g. an
+            // MCP elicitation) have no scoped twin and always get a marker.
+            if !scoped && kind == Kind::Permission {
                 let covered = session_markers(claude_dir, &h.session_id)
                     .iter()
                     .filter_map(|p| read(p))
@@ -410,9 +424,16 @@ pub fn load_all(claude_dir: &Path, now: f64) -> Vec<(String, Marker)> {
             Some((sid, m))
         })
         .collect();
-    out.sort_by(|a, b| a.1.since.total_cmp(&b.1.since));
+    // One entry per session: a blocking prompt outranks "your turn", then the
+    // oldest wins.
+    out.sort_by(|a, b| {
+        (a.1.kind == Kind::YourTurn)
+            .cmp(&(b.1.kind == Kind::YourTurn))
+            .then(a.1.since.total_cmp(&b.1.since))
+    });
     let mut seen = std::collections::HashSet::new();
     out.retain(|(sid, _)| seen.insert(sid.clone()));
+    out.sort_by(|a, b| a.1.since.total_cmp(&b.1.since).then(a.0.cmp(&b.0)));
     out
 }
 
@@ -748,11 +769,11 @@ mod tests {
         assert_eq!(marker_files(d.path()), 1, "answering b2 leaves a1 waiting");
         assert_eq!(load_all(d.path(), now).len(), 1);
 
-        apply_hook(d.path(), &hook("Stop", "", "", "s1"), now, || None);
+        apply_hook(d.path(), &hook("SessionEnd", "", "", "s1"), now, || None);
         assert_eq!(
             marker_files(d.path()),
             0,
-            "turn end clears every agent's marker"
+            "session end clears every agent's marker"
         );
     }
 
@@ -787,6 +808,71 @@ mod tests {
         )
         .unwrap();
         assert!(load_all(d.path(), now).is_empty());
+    }
+
+    #[test]
+    fn blocking_prompt_outranks_an_older_your_turn() {
+        let d = tempdir().unwrap();
+        apply_hook(
+            d.path(),
+            &hook("Notification", "idle_prompt", "", "s1"),
+            100.0,
+            || None,
+        );
+        let mut p = tool("PermissionRequest", "Bash", "s1", "bg1", "rm x");
+        p.transcript_path = "/nonexistent/s1.jsonl".into();
+        apply_hook(d.path(), &p, 200.0, || None);
+        let all = load_all(d.path(), 210.0);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].1.kind, Kind::Permission);
+    }
+
+    #[test]
+    fn main_thread_elicitation_is_not_hidden_by_a_subagent_question() {
+        let d = tempdir().unwrap();
+        let mut q = tool("PreToolUse", "AskUserQuestion", "s1", "a1", "q?");
+        q.tool_use_id = "t1".into();
+        q.transcript_path = "/nonexistent/s1.jsonl".into();
+        apply_hook(d.path(), &q, 100.0, || None);
+        apply_hook(
+            d.path(),
+            &hook("Notification", "elicitation_dialog", "", "s1"),
+            110.0,
+            || None,
+        );
+        let mut done = tool("PostToolUse", "AskUserQuestion", "s1", "a1", "q? a");
+        done.tool_use_id = "t1".into();
+        apply_hook(d.path(), &done, 120.0, || None);
+        assert_eq!(
+            load_all(d.path(), 130.0).len(),
+            1,
+            "elicitation still pending"
+        );
+    }
+
+    #[test]
+    fn main_turn_ending_keeps_a_background_subagents_prompt() {
+        let d = tempdir().unwrap();
+        let mut p = tool("PermissionRequest", "Bash", "s1", "bg1", "rm x");
+        p.transcript_path = "/nonexistent/s1.jsonl".into();
+        apply_hook(d.path(), &p, 100.0, || None);
+        apply_hook(
+            d.path(),
+            &hook("Notification", "idle_prompt", "", "s1"),
+            110.0,
+            || None,
+        );
+        apply_hook(d.path(), &hook("Stop", "", "", "s1"), 120.0, || None);
+        apply_hook(
+            d.path(),
+            &hook("UserPromptSubmit", "", "", "s1"),
+            130.0,
+            || None,
+        );
+        let all = load_all(d.path(), 140.0);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].1.kind, Kind::Permission);
+        assert_eq!(marker_files(d.path()), 1, "main-thread idle marker cleared");
     }
 
     #[test]
@@ -885,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn notification_only_marker_clears_on_any_tool_completion() {
+    fn notification_only_marker_clears_on_any_main_thread_completion() {
         let d = tempdir().unwrap();
         apply_hook(
             d.path(),
@@ -900,7 +986,14 @@ mod tests {
             12.0,
             || None,
         );
-        assert!(load_all(d.path(), 13.0).is_empty());
+        assert_eq!(load_all(d.path(), 13.0).len(), 1, "subagent completion");
+        apply_hook(
+            d.path(),
+            &tool("PostToolUse", "Bash", "s1", "", "ls"),
+            14.0,
+            || None,
+        );
+        assert!(load_all(d.path(), 15.0).is_empty());
     }
 
     #[test]
