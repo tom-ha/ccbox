@@ -7,7 +7,7 @@ use proptest::prelude::*;
 use ccbox::{
     ansi::strip_ansi,
     config::{Density, Env, TasksView},
-    consts::MIN_WIDTH,
+    consts::{MEDIUM_WIDTH, MIN_WIDTH, NARROW_WIDTH},
     input::session::{Model, RateBucket, RateLimits, SessionInfo},
     render,
     width::visible_width,
@@ -69,7 +69,7 @@ proptest! {
 
     #[test]
     fn every_row_has_requested_visible_width(
-        width in MIN_WIDTH..=200,
+        width in prop_oneof![MIN_WIDTH..NARROW_WIDTH, NARROW_WIDTH..MEDIUM_WIDTH, MEDIUM_WIDTH..=200],
         density in arb_density(),
         tasks_view in arb_tasks_view(),
         model in arb_model(),
