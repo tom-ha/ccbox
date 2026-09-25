@@ -54,10 +54,18 @@ json_urls() {
 }
 
 # Sets TAR_URL/SUMS_URL for triple $1 from the latest release. Returns 1 when no
-# release is found, 2 when it has no tarball for $1, 3 when it has no SHA256SUMS.
+# release is found, 2 when it has no tarball for $1, 3 when it has no SHA256SUMS,
+# 4 when the lookup itself fails (LOOKUP_STATUS holds the HTTP status, 000 if none).
 find_prebuilt() {
-  local triple="$1" json tag
-  json="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$RELEASES_URL/releases/latest" 2>/dev/null)" || return 1
+  local triple="$1" json tag body
+  body="$(mktemp)"
+  LOOKUP_STATUS="$(curl -sSL -o "$body" -w '%{http_code}' -H 'Accept: application/vnd.github+json' "$RELEASES_URL/releases/latest" 2>/dev/null || true)"
+  json="$(cat "$body")"; rm -f "$body"
+  case "$LOOKUP_STATUS" in
+    200) ;;
+    404) return 1 ;;
+    *) return 4 ;;
+  esac
   tag="$(printf '%s' "$json" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed 's/.*"\([^"]*\)"$/\1/')"
   [[ -n "$tag" ]] || return 1
   RELEASE_TAG="$tag"
@@ -153,7 +161,11 @@ case "$(printf '%s' "${CCBOX_BUILD_FROM_SOURCE:-}" | tr '[:upper:]' '[:lower:]')
           echo "==> release $RELEASE_TAG has no prebuilt ccbox for $TRIPLE; building from source instead"
           install_from_source
           ;;
-        *)
+        4)
+          echo "==> could not look up the latest release at $RELEASES_URL (HTTP ${LOOKUP_STATUS:-000}); building from source instead"
+          install_from_source
+          ;;
+        3)
           err "release $RELEASE_TAG has $TAR_NAME but no SHA256SUMS; not installing an unverified binary"
           exit 1
           ;;

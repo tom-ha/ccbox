@@ -53,8 +53,17 @@ pub fn run(args: &Args, out: &mut dyn Write) -> Result<(), String> {
     let base = release::releases_url();
     let api = release::agent(API_TIMEOUT);
     let which = args.version.map_or(Which::Latest, Which::Pinned);
-    let found = release::fetch_release(&api, &base, which)
-        .map_err(|e| format!("could not look up the release: {e}"))?;
+    let found = match release::fetch_release(&api, &base, which) {
+        Ok(found) => found,
+        Err(e) => {
+            if !args.check {
+                let _ = rewire_in_place(out);
+            }
+            return Err(format!(
+                "could not look up the release: {e}; run `ccbox update` again when it is reachable"
+            ));
+        }
+    };
 
     let Some(rel) = found else {
         return match which {
@@ -204,7 +213,10 @@ pub fn install(rel: &Release, exe: &Path) -> Result<(), String> {
         )
     })?;
     let dir = exe.parent().ok_or("the binary has no parent directory")?;
-    let path = dir.join(format!(".ccbox-update-{}.tmp", std::process::id()));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let path = dir.join(format!(".ccbox-update-{}-{nanos}.tmp", std::process::id()));
     let unwritable = |e: io::Error| {
         format!(
             "cannot write to {} ({e}), so {} cannot be replaced. Re-run install.sh with CCBOX_BIN_DIR set to a directory you can write to, or copy the new binary in with elevated privileges and then run `ccbox update` as yourself to rewire your settings.json",

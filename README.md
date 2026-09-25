@@ -314,12 +314,15 @@ The CLI flag `--width COLS` lets you preview a specific size regardless of the a
 
 ## Releasing
 
-One version covers the binary, the plugin and the marketplace entry. To cut a release from an up-to-date `main`, with the changes listed under `## [Unreleased]` in `CHANGELOG.md`:
+One version covers the binary, the plugin and the marketplace entry. To cut a release, with the changes listed under `## [Unreleased]` in `CHANGELOG.md`:
 
 ```bash
+git switch main && git pull --ff-only
 scripts/release.sh 0.7.0
-git push origin main v0.7.0
+git push --atomic origin main v0.7.0
 ```
+
+`--atomic` pushes the branch and the tag together or not at all, so a rejected `main` push can't publish a tag from a commit that isn't on `main`.
 
 `scripts/release.sh` refuses a dirty tree, an existing tag, or anything but `X.Y.Z`. It sets the version in `Cargo.toml`, `Cargo.lock`, `.claude-plugin/marketplace.json` (both fields) and `plugins/ccbox/.claude-plugin/plugin.json`, moves the `[Unreleased]` entries under `## [0.7.0] - <date>`, commits `release: v0.7.0` and creates the annotated tag. It pushes nothing.
 

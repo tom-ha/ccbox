@@ -16,7 +16,7 @@ fi
 branch="$(git symbolic-ref --short -q HEAD)" || err "HEAD is detached; check out the branch to release from"
 
 files=(CHANGELOG.md Cargo.toml Cargo.lock .claude-plugin/marketplace.json plugins/ccbox/.claude-plugin/plugin.json)
-trap 'git checkout -q HEAD -- "${files[@]}"; err "release aborted; version files restored"' ERR
+trap 'git checkout -q HEAD -- "${files[@]}"; err "release aborted; version files restored"' ERR INT TERM
 
 python3 - "$version" <<'PY'
 import datetime, json, re, sys
@@ -63,8 +63,8 @@ scripts/check-versions.sh "$version"
 
 git add "${files[@]}"
 git commit -q -m "release: $tag"
-trap - ERR
-git tag -a "$tag" -m "ccbox $tag"
+trap - ERR INT TERM
+git tag -a "$tag" -m "ccbox $tag" || err "committed 'release: $tag' but could not create the tag; fix the cause, then run: git tag -a $tag -m 'ccbox $tag'"
 
 echo "==> committed 'release: $tag' and tagged $tag"
-echo "==> publish it with: git push origin $branch $tag"
+echo "==> publish it with: git push --atomic origin $branch $tag"
