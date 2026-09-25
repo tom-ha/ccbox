@@ -45,9 +45,10 @@ fn lock_path(claude_dir: &Path) -> PathBuf {
     claude_dir.join("ccbox-cache").join("account-usage.lock")
 }
 
-/// A lock stamped in the future (clock moved back) is treated as stale.
+/// A lock stamped well in the future (clock moved back) is stale; a few
+/// seconds of slack covers a lock created just after `now` was read.
 fn lock_held(lock_mtime: f64, now: f64) -> bool {
-    (0.0..LOCK_STALE_SECS).contains(&(now - lock_mtime))
+    (-5.0..LOCK_STALE_SECS).contains(&(now - lock_mtime))
 }
 
 fn attempt_path(claude_dir: &Path) -> PathBuf {
@@ -347,6 +348,10 @@ mod tests {
     #[test]
     fn lock_is_held_only_while_recent() {
         assert!(lock_held(1_000.0, 1_010.0));
+        assert!(
+            lock_held(1_001.0, 1_000.0),
+            "created just after now was read"
+        );
         assert!(!lock_held(1_000.0, 1_000.0 + LOCK_STALE_SECS));
         assert!(!lock_held(5_000.0, 1_000.0), "lock from the future");
     }

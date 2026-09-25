@@ -109,12 +109,53 @@ fn dir(claude_dir: &Path) -> PathBuf {
     claude_dir.join("ccbox-cache").join("waiting")
 }
 
-fn marker_path(claude_dir: &Path, session_id: &str) -> Option<PathBuf> {
-    let safe = !session_id.is_empty()
-        && session_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    safe.then(|| dir(claude_dir).join(format!("{session_id}.json")))
+fn safe_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// One marker per agent, so parallel subagents waiting at once are tracked
+/// independently: `<session>.json` for the main thread, `<session>@<agent>.json`
+/// for a subagent.
+fn marker_path(claude_dir: &Path, session_id: &str, agent_id: &str) -> Option<PathBuf> {
+    if !safe_id(session_id) {
+        return None;
+    }
+    let name = if agent_id.is_empty() {
+        format!("{session_id}.json")
+    } else if safe_id(agent_id) {
+        format!("{session_id}@{agent_id}.json")
+    } else {
+        return None;
+    };
+    Some(dir(claude_dir).join(name))
+}
+
+fn session_markers(claude_dir: &Path, session_id: &str) -> Vec<PathBuf> {
+    let prefix = format!("{session_id}@");
+    fs::read_dir(dir(claude_dir))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.ends_with(".json")
+                    && (n == format!("{session_id}.json") || n.starts_with(&prefix))
+            })
+        })
+        .collect()
+}
+
+fn write_marker(claude_dir: &Path, path: &Path, marker: &Marker) {
+    let _ = fs::create_dir_all(dir(claude_dir));
+    if let Ok(body) = serde_json::to_string(marker) {
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        if fs::write(&tmp, body).is_ok() {
+            let _ = fs::rename(&tmp, path);
+        }
+    }
 }
 
 fn display_name(h: &HookInput) -> String {
@@ -138,7 +179,7 @@ fn owner_alive(m: &Marker) -> bool {
 }
 
 /// Hooks always report the main transcript, but a subagent writes to
-/// `<session>/subagents/[<subdir>/]agent-<agent_id>.jsonl`; its prompt is
+/// `<session>/subagents/[<subdirs>/]agent-<agent_id>.jsonl`; its prompt is
 /// only answered once that file moves on.
 fn activity_transcript(m: &Marker) -> Option<PathBuf> {
     let main = PathBuf::from(&m.transcript_path);
@@ -153,16 +194,24 @@ fn activity_transcript(m: &Marker) -> Option<PathBuf> {
         return None;
     }
     let root = main.with_extension("").join("subagents");
-    let file = format!("agent-{}.jsonl", m.agent_id);
-    let direct = root.join(&file);
+    find_file(&root, &format!("agent-{}.jsonl", m.agent_id), 3)
+}
+
+/// Workflow agents nest deeper (`subagents/workflows/<run>/`).
+fn find_file(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
+    let direct = dir.join(name);
     if direct.is_file() {
         return Some(direct);
     }
-    fs::read_dir(&root)
+    if depth == 0 {
+        return None;
+    }
+    fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)
-        .map(|e| e.path().join(&file))
-        .find(|p| p.is_file())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .find_map(|p| find_file(&p, name, depth - 1))
 }
 
 /// Only a conversation record (`user`/`assistant`) written after the prompt
@@ -261,41 +310,66 @@ pub fn apply_hook(
     now: f64,
     owner_pid: impl FnOnce() -> Option<u32>,
 ) {
-    let Some(path) = marker_path(claude_dir, &h.session_id) else {
+    if !safe_id(&h.session_id) {
         return;
-    };
+    }
     match action(h) {
         Action::Ignore => {}
         Action::Clear => {
-            let _ = fs::remove_file(&path);
+            for p in session_markers(claude_dir, &h.session_id) {
+                let _ = fs::remove_file(p);
+            }
         }
         Action::ToolDone => {
-            let finishes_marker = read(&path).is_some_and(|m| {
-                // An answered AskUserQuestion comes back with rewritten
-                // tool_input, so a known tool_use_id is matched on its own.
-                !m.scoped
-                    || (m.agent_id == h.agent_id
-                        && if m.tool_use_id.is_empty() {
-                            m.tool_key.is_empty() || m.tool_key == h.tool_key()
-                        } else {
-                            m.tool_use_id == h.tool_use_id
-                        })
-            });
-            if finishes_marker {
-                let _ = fs::remove_file(&path);
+            // The unscoped main marker clears on any completion; a scoped one
+            // only on its own call. An answered AskUserQuestion comes back with
+            // rewritten tool_input, so a known tool_use_id is matched alone.
+            let paths = [
+                marker_path(claude_dir, &h.session_id, ""),
+                marker_path(claude_dir, &h.session_id, &h.agent_id),
+            ];
+            for path in paths.into_iter().flatten() {
+                let finishes = read(&path).is_some_and(|m| {
+                    !m.scoped
+                        || (m.agent_id == h.agent_id
+                            && if m.tool_use_id.is_empty() {
+                                m.tool_key.is_empty() || m.tool_key == h.tool_key()
+                            } else {
+                                m.tool_use_id == h.tool_use_id
+                            })
+                });
+                if finishes {
+                    let _ = fs::remove_file(&path);
+                }
             }
         }
         Action::Set(kind) => {
-            let prev = read(&path);
             let scoped = matches!(
                 h.hook_event_name.as_str(),
                 "PermissionRequest" | "PreToolUse"
             );
-            if !scoped && prev.as_ref().is_some_and(|m| m.kind == kind && m.scoped) {
-                return;
+            if !scoped {
+                let covered = session_markers(claude_dir, &h.session_id)
+                    .iter()
+                    .filter_map(|p| read(p))
+                    .any(|m| m.kind == kind && m.scoped);
+                if covered {
+                    return;
+                }
             }
-            let since = match &prev {
-                Some(m) if m.kind == kind => m.since,
+            let agent = if scoped { h.agent_id.as_str() } else { "" };
+            let Some(path) = marker_path(claude_dir, &h.session_id, agent) else {
+                return;
+            };
+            let tool_key = if scoped { h.tool_key() } else { String::new() };
+            let since = match read(&path) {
+                Some(m)
+                    if m.kind == kind
+                        && m.tool_key == tool_key
+                        && m.tool_use_id == h.tool_use_id =>
+                {
+                    m.since
+                }
                 _ => now,
             };
             let marker = Marker {
@@ -304,18 +378,12 @@ pub fn apply_hook(
                 name: display_name(h),
                 pid: owner_pid(),
                 transcript_path: h.transcript_path.clone(),
-                agent_id: h.agent_id.clone(),
+                agent_id: agent.to_string(),
                 tool_use_id: h.tool_use_id.clone(),
-                tool_key: if scoped { h.tool_key() } else { String::new() },
+                tool_key,
                 scoped,
             };
-            let _ = fs::create_dir_all(dir(claude_dir));
-            if let Ok(body) = serde_json::to_string(&marker) {
-                let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-                if fs::write(&tmp, body).is_ok() {
-                    let _ = fs::rename(&tmp, &path);
-                }
-            }
+            write_marker(claude_dir, &path, &marker);
         }
     }
 }
@@ -329,11 +397,8 @@ pub fn load_all(claude_dir: &Path, now: f64) -> Vec<(String, Marker)> {
         .filter_map(Result::ok)
         .filter_map(|e| {
             let path = e.path();
-            let sid = path
-                .file_name()?
-                .to_str()?
-                .strip_suffix(".json")?
-                .to_string();
+            let stem = path.file_name()?.to_str()?.strip_suffix(".json")?;
+            let sid = stem.split('@').next()?.to_string();
             let m = read(&path)?;
             if now - m.since > STALE_SECS || !owner_alive(&m) || moved_on(&m) {
                 let _ = fs::remove_file(&path);
@@ -346,6 +411,8 @@ pub fn load_all(claude_dir: &Path, now: f64) -> Vec<(String, Marker)> {
         })
         .collect();
     out.sort_by(|a, b| a.1.since.total_cmp(&b.1.since));
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|(sid, _)| seen.insert(sid.clone()));
     out
 }
 
@@ -636,6 +703,90 @@ mod tests {
         done.tool_use_id = "toolu_1".into();
         apply_hook(d.path(), &done, 11.0, || None);
         assert!(load_all(d.path(), 12.0).is_empty());
+    }
+
+    fn marker_files(d: &Path) -> usize {
+        fs::read_dir(dir(d)).map(|r| r.count()).unwrap_or(0)
+    }
+
+    #[test]
+    fn parallel_subagent_prompts_are_tracked_independently() {
+        use chrono::{TimeZone, Utc};
+        let d = tempdir().unwrap();
+        let main = d.path().join("s1.jsonl");
+        let sub_dir = d.path().join("s1").join("subagents");
+        fs::create_dir_all(&sub_dir).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let t0 = now - 60.0;
+        let line = |at: f64| {
+            let ts = Utc.timestamp_opt(at as i64, 0).unwrap().to_rfc3339();
+            format!("{{\"type\":\"assistant\",\"timestamp\":\"{ts}\"}}\n")
+        };
+        fs::write(&main, "").unwrap();
+        fs::write(sub_dir.join("agent-a1.jsonl"), line(t0 - 1.0)).unwrap();
+        let mut a1 = tool("PermissionRequest", "Bash", "s1", "a1", "rm x");
+        a1.transcript_path = main.to_string_lossy().into();
+        apply_hook(d.path(), &a1, t0, || None);
+
+        // b2 keeps working, then asks at t0+30.
+        fs::write(sub_dir.join("agent-b2.jsonl"), line(t0 + 20.0)).unwrap();
+        let mut b2 = tool("PermissionRequest", "Bash", "s1", "b2", "rm y");
+        b2.transcript_path = main.to_string_lossy().into();
+        apply_hook(d.path(), &b2, t0 + 30.0, || None);
+        assert_eq!(load_all(d.path(), now).len(), 1, "one entry per session");
+        assert_eq!(marker_files(d.path()), 2, "both prompts still pending");
+
+        apply_hook(
+            d.path(),
+            &tool("PostToolUse", "Bash", "s1", "b2", "rm y"),
+            now,
+            || None,
+        );
+        assert_eq!(marker_files(d.path()), 1, "answering b2 leaves a1 waiting");
+        assert_eq!(load_all(d.path(), now).len(), 1);
+
+        apply_hook(d.path(), &hook("Stop", "", "", "s1"), now, || None);
+        assert_eq!(
+            marker_files(d.path()),
+            0,
+            "turn end clears every agent's marker"
+        );
+    }
+
+    #[test]
+    fn workflow_subagent_transcript_is_found() {
+        use chrono::{TimeZone, Utc};
+        let d = tempdir().unwrap();
+        let main = d.path().join("s1.jsonl");
+        let wf = d
+            .path()
+            .join("s1")
+            .join("subagents")
+            .join("workflows")
+            .join("wf_1");
+        fs::create_dir_all(&wf).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let t0 = now - 60.0;
+        fs::write(&main, "").unwrap();
+        let mut h = tool("PermissionRequest", "Bash", "s1", "a1", "rm x");
+        h.transcript_path = main.to_string_lossy().into();
+        apply_hook(d.path(), &h, t0, || None);
+        let ts = Utc
+            .timestamp_opt((t0 + 30.0) as i64, 0)
+            .unwrap()
+            .to_rfc3339();
+        fs::write(
+            wf.join("agent-a1.jsonl"),
+            format!("{{\"type\":\"user\",\"timestamp\":\"{ts}\"}}\n"),
+        )
+        .unwrap();
+        assert!(load_all(d.path(), now).is_empty());
     }
 
     #[test]
