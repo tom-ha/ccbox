@@ -137,12 +137,43 @@ fn owner_alive(m: &Marker) -> bool {
     m.pid.map_or(true, process_alive)
 }
 
+/// Hooks always report the main transcript, but a subagent writes to
+/// `<session>/subagents/[<subdir>/]agent-<agent_id>.jsonl`; its prompt is
+/// only answered once that file moves on.
+fn activity_transcript(m: &Marker) -> Option<PathBuf> {
+    let main = PathBuf::from(&m.transcript_path);
+    if !m.scoped || m.agent_id.is_empty() {
+        return Some(main);
+    }
+    if !m
+        .agent_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let root = main.with_extension("").join("subagents");
+    let file = format!("agent-{}.jsonl", m.agent_id);
+    let direct = root.join(&file);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    fs::read_dir(&root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path().join(&file))
+        .find(|p| p.is_file())
+}
+
 /// Only a conversation record (`user`/`assistant`) written after the prompt
 /// counts: Claude Code also appends metadata records while a prompt waits.
 fn moved_on(m: &Marker) -> bool {
     const TAIL_BYTES: u64 = 64 * 1024;
     let cutoff = m.since + ACTIVITY_GRACE_SECS;
-    let Ok(mut f) = fs::File::open(&m.transcript_path) else {
+    let Some(transcript) = activity_transcript(m) else {
+        return false;
+    };
+    let Ok(mut f) = fs::File::open(transcript) else {
         return false;
     };
     let fresh = f
@@ -240,10 +271,15 @@ pub fn apply_hook(
         }
         Action::ToolDone => {
             let finishes_marker = read(&path).is_some_and(|m| {
+                // An answered AskUserQuestion comes back with rewritten
+                // tool_input, so a known tool_use_id is matched on its own.
                 !m.scoped
                     || (m.agent_id == h.agent_id
-                        && (m.tool_use_id.is_empty() || m.tool_use_id == h.tool_use_id)
-                        && (m.tool_key.is_empty() || m.tool_key == h.tool_key()))
+                        && if m.tool_use_id.is_empty() {
+                            m.tool_key.is_empty() || m.tool_key == h.tool_key()
+                        } else {
+                            m.tool_use_id == h.tool_use_id
+                        })
             });
             if finishes_marker {
                 let _ = fs::remove_file(&path);
@@ -547,6 +583,59 @@ mod tests {
         h.transcript_path = t.to_string_lossy().into();
         apply_hook(d.path(), &h, since, || None);
         assert!(load_all(d.path(), now).is_empty());
+    }
+
+    #[test]
+    fn subagent_prompt_follows_the_subagent_transcript_not_the_main_one() {
+        use chrono::{TimeZone, Utc};
+        let d = tempdir().unwrap();
+        let main = d.path().join("s1.jsonl");
+        let sub_dir = d.path().join("s1").join("subagents");
+        fs::create_dir_all(&sub_dir).unwrap();
+        let sub = sub_dir.join("agent-a1.jsonl");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let since = now - 60.0;
+        let line = |kind: &str| {
+            let ts = Utc
+                .timestamp_opt((since + 30.0) as i64, 0)
+                .unwrap()
+                .to_rfc3339();
+            format!("{{\"type\":\"{kind}\",\"timestamp\":\"{ts}\"}}\n")
+        };
+        fs::write(&main, line("assistant")).unwrap();
+        fs::write(&sub, "").unwrap();
+
+        let mut h = tool("PermissionRequest", "Bash", "s1", "a1", "rm x");
+        h.transcript_path = main.to_string_lossy().into();
+        apply_hook(d.path(), &h, since, || None);
+        assert_eq!(load_all(d.path(), now).len(), 1, "main-thread activity");
+
+        fs::write(&sub, line("user")).unwrap();
+        assert!(
+            load_all(d.path(), now).is_empty(),
+            "subagent got its answer"
+        );
+    }
+
+    #[test]
+    fn answered_question_matches_by_tool_use_id_despite_rewritten_input() {
+        let d = tempdir().unwrap();
+        let mut ask = tool("PreToolUse", "AskUserQuestion", "s1", "a1", "q?");
+        ask.tool_use_id = "toolu_1".into();
+        apply_hook(d.path(), &ask, 10.0, || None);
+        let mut done = tool(
+            "PostToolUse",
+            "AskUserQuestion",
+            "s1",
+            "a1",
+            "q? answers=yes",
+        );
+        done.tool_use_id = "toolu_1".into();
+        apply_hook(d.path(), &done, 11.0, || None);
+        assert!(load_all(d.path(), 12.0).is_empty());
     }
 
     #[test]

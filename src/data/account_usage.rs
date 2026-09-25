@@ -45,6 +45,11 @@ fn lock_path(claude_dir: &Path) -> PathBuf {
     claude_dir.join("ccbox-cache").join("account-usage.lock")
 }
 
+/// A lock stamped in the future (clock moved back) is treated as stale.
+fn lock_held(lock_mtime: f64, now: f64) -> bool {
+    (0.0..LOCK_STALE_SECS).contains(&(now - lock_mtime))
+}
+
 fn attempt_path(claude_dir: &Path) -> PathBuf {
     claude_dir
         .join("ccbox-cache")
@@ -102,7 +107,7 @@ pub fn load(claude_dir: &Path, now: f64) -> Option<AccountUsage> {
     let age = cached
         .as_ref()
         .map_or(f64::INFINITY, |c| now - c.fetched_at);
-    let refreshing = mtime_secs(&lock_path(claude_dir)).is_some_and(|t| now - t < LOCK_STALE_SECS);
+    let refreshing = mtime_secs(&lock_path(claude_dir)).is_some_and(|t| lock_held(t, now));
     let attempt = read_attempt(claude_dir);
     let due = refresh_due(age, &attempt, now);
     if due && !refreshing && spawn_refresh() {
@@ -141,7 +146,7 @@ pub fn refresh(claude_dir: &Path, now: f64) {
     let dir = claude_dir.join("ccbox-cache");
     let _ = fs::create_dir_all(&dir);
     let lock = lock_path(claude_dir);
-    if mtime_secs(&lock).is_some_and(|t| now - t >= LOCK_STALE_SECS) {
+    if mtime_secs(&lock).is_some_and(|t| !lock_held(t, now)) {
         let _ = fs::remove_file(&lock);
     }
     if OpenOptions::new()
@@ -337,5 +342,12 @@ mod tests {
             refresh_due(400.0, &a(5_000.0, 3), 1_000.0),
             "attempt from the future"
         );
+    }
+
+    #[test]
+    fn lock_is_held_only_while_recent() {
+        assert!(lock_held(1_000.0, 1_010.0));
+        assert!(!lock_held(1_000.0, 1_000.0 + LOCK_STALE_SECS));
+        assert!(!lock_held(5_000.0, 1_000.0), "lock from the future");
     }
 }
