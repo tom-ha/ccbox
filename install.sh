@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build & install ccbox, then wire it into Claude Code's statusLine.
-# Requires: cargo (https://rustup.rs) and python3.
-#
-# Works both when run from a local ccbox checkout (./install.sh) and when
-# piped from curl (curl -fsSL <raw-url> | bash). In the local case it
-# installs from the working tree; in the curl case it installs from the
-# canonical git repo (override with CCBOX_REPO_URL / CCBOX_REPO_BRANCH).
+# Install ccbox and wire it into Claude Code's statusLine and hooks: the
+# prebuilt binary from the latest release, SHA-256 verified, or a cargo build
+# when there is none for this platform or CCBOX_BUILD_FROM_SOURCE=1. Works from
+# a local checkout (./install.sh) and piped from curl (curl -fsSL <url> | bash).
 
 REPO_URL="${CCBOX_REPO_URL:-https://github.com/tom-ha/ccbox.git}"
 REPO_BRANCH="${CCBOX_REPO_BRANCH:-main}"
+RELEASES_URL="${CCBOX_RELEASES_URL:-https://api.github.com/repos/tom-ha/ccbox}"
+RELEASES_URL="${RELEASES_URL%/}"
+BIN_DIR="${CCBOX_BIN_DIR:-${CARGO_HOME:-$HOME/.cargo}/bin}"
 
 err() { printf 'error: %s\n' "$*" >&2; }
 
@@ -26,109 +26,123 @@ if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
   fi
 fi
 
-if ! command -v cargo >/dev/null 2>&1; then
-  err "cargo not found in PATH."
-  err "Install Rust via rustup:"
-  err "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-  exit 1
-fi
+host_triple() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  if [[ "$os" == Darwin && "$arch" == x86_64 && "$(sysctl -n sysctl.proc_translated 2>/dev/null)" == 1 ]]; then
+    arch=arm64
+  fi
+  case "$os/$arch" in
+    Darwin/arm64 | Darwin/aarch64) echo aarch64-apple-darwin ;;
+    Darwin/x86_64) echo x86_64-apple-darwin ;;
+    Linux/x86_64 | Linux/amd64) echo x86_64-unknown-linux-musl ;;
+    Linux/aarch64 | Linux/arm64) echo aarch64-unknown-linux-musl ;;
+  esac
+}
 
-if ! command -v python3 >/dev/null 2>&1; then
-  err "python3 not found in PATH (used to patch settings.json)."
-  exit 1
-fi
-
-if [[ -n "$LOCAL_SOURCE" ]]; then
-  echo "==> installing ccbox from local source ($LOCAL_SOURCE)"
-  echo "==> building ccbox from source (this takes a minute)"
-  cargo install --path "$LOCAL_SOURCE" --locked
-else
-  echo "==> installing ccbox from $REPO_URL@$REPO_BRANCH"
-  echo "==> building ccbox from source (this takes a minute)"
-  cargo install --git "$REPO_URL" --branch "$REPO_BRANCH" --locked
-fi
-
-CCBOX_BIN="$(command -v ccbox || true)"
-if [[ -z "$CCBOX_BIN" ]]; then
-  CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
-  if [[ -x "$CARGO_BIN/ccbox" ]]; then
-    CCBOX_BIN="$CARGO_BIN/ccbox"
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
   else
-    err "could not locate the installed ccbox binary; check 'cargo install' output above."
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+json_urls() {
+  grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+# Sets TAR_URL/SUMS_URL for triple $1 from the latest release; returns 1 if it has no such tarball.
+find_prebuilt() {
+  local triple="$1" json tag name
+  json="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$RELEASES_URL/releases/latest" 2>/dev/null)" || return 1
+  tag="$(printf '%s' "$json" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed 's/.*"\([^"]*\)"$/\1/')"
+  [[ -n "$tag" ]] || return 1
+  name="ccbox-${tag#v}-$triple.tar.gz"
+  TAR_URL="$(printf '%s' "$json" | json_urls | grep "/$name\$" | head -n1 || true)"
+  SUMS_URL="$(printf '%s' "$json" | json_urls | grep '/SHA256SUMS$' | head -n1 || true)"
+  TAR_NAME="$name"
+  RELEASE_TAG="$tag"
+  [[ -n "$TAR_URL" && -n "$SUMS_URL" ]]
+}
+
+install_prebuilt() {
+  local tmp expected actual
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  echo "==> downloading ccbox $RELEASE_TAG ($TAR_NAME)"
+  curl -fsSL -o "$tmp/$TAR_NAME" "$TAR_URL" || { err "download failed: $TAR_URL"; return 1; }
+  curl -fsSL -o "$tmp/SHA256SUMS" "$SUMS_URL" || { err "download failed: $SUMS_URL"; return 1; }
+  expected="$(awk -v n="$TAR_NAME" '$2 == n || $2 == "*" n { print $1 }' "$tmp/SHA256SUMS" | head -n1)"
+  actual="$(sha256_of "$tmp/$TAR_NAME")"
+  if [[ -z "$expected" ]]; then
+    err "SHA256SUMS has no line for $TAR_NAME; not installing"
+    return 1
+  fi
+  if [[ "$expected" != "$actual" ]]; then
+    err "checksum mismatch for $TAR_NAME: expected $expected, got $actual; not installing"
+    return 1
+  fi
+  echo "==> checksum verified ($actual)"
+  tar -xzf "$tmp/$TAR_NAME" -C "$tmp" ccbox || { err "$TAR_NAME has no ccbox binary"; return 1; }
+  [[ -f "$tmp/ccbox" ]] || { err "$TAR_NAME has no ccbox binary"; return 1; }
+  mkdir -p "$BIN_DIR"
+  cp "$tmp/ccbox" "$BIN_DIR/.ccbox-install.$$"
+  chmod 0755 "$BIN_DIR/.ccbox-install.$$"
+  mv -f "$BIN_DIR/.ccbox-install.$$" "$BIN_DIR/ccbox"
+  CCBOX_BIN="$BIN_DIR/ccbox"
+}
+
+install_from_source() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    err "cargo not found in PATH, and it is needed to build ccbox from source."
+    err "Install Rust via rustup:"
+    err "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
     exit 1
   fi
-fi
-echo "==> installed: $CCBOX_BIN"
-
-CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-SETTINGS="$CLAUDE_DIR/settings.json"
-mkdir -p "$CLAUDE_DIR"
-
-if [[ -f "$SETTINGS" ]]; then
-  BACKUP="$SETTINGS.bak.$(date +%Y%m%d-%H%M%S)"
-  cp "$SETTINGS" "$BACKUP"
-  echo "==> backed up existing settings to $BACKUP"
-else
-  echo "{}" > "$SETTINGS"
-fi
-
-python3 - "$SETTINGS" "$CCBOX_BIN" <<'PY'
-import json, shlex, sys, pathlib
-path = pathlib.Path(sys.argv[1])
-ccbox = sys.argv[2]
-data = json.loads(path.read_text() or "{}")
-prev = data.get("statusLine")
-if prev is not None:
-    print(f"==> previous statusLine: {json.dumps(prev)}")
-data["statusLine"] = {"type": "command", "command": shlex.quote(ccbox), "refreshInterval": 5}
-
-# Hooks feed the "needs you" row. Replace any earlier ccbox hook groups so
-# re-running the installer stays idempotent; other hooks are left alone.
-hook_cmd = f"{shlex.quote(ccbox)} hook"
-def is_ccbox_hook(h):
-    if not isinstance(h, dict):
-        return False
-    try:
-        toks = shlex.split(str(h.get("command", "")))
-    except ValueError:
-        return False
-    return len(toks) >= 2 and toks[-1] == "hook" and pathlib.PurePosixPath(toks[-2]).name == "ccbox"
-wanted = {
-    "Notification": [""],
-    "PermissionRequest": [""],
-    "PermissionDenied": [""],
-    "PreToolUse": ["AskUserQuestion"],
-    "PostToolUse": [""],
-    "PostToolUseFailure": [""],
-    "UserPromptSubmit": [""],
-    "Stop": [""],
-    "SubagentStop": [""],
-    "SessionEnd": [""],
+  local root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"
+  echo "==> building ccbox from source (this takes a minute)"
+  if [[ -n "$LOCAL_SOURCE" ]]; then
+    echo "==> source: $LOCAL_SOURCE"
+    cargo install --path "$LOCAL_SOURCE" --locked --root "$root"
+  else
+    echo "==> source: $REPO_URL@$REPO_BRANCH"
+    cargo install --git "$REPO_URL" --branch "$REPO_BRANCH" --locked --root "$root"
+  fi
+  CCBOX_BIN="$root/bin/ccbox"
 }
-hooks = data.setdefault("hooks", {})
-if not isinstance(hooks, dict):
-    sys.exit(f"==> settings.json 'hooks' is not an object; not touching it")
-for event, matchers in wanted.items():
-    existing = hooks.get(event, [])
-    if not isinstance(existing, list):
-        print(f"==> hooks.{event} is not a list; leaving it alone (no ccbox hook added)")
-        continue
-    groups = []
-    for g in existing:
-        inner = g.get("hooks") if isinstance(g, dict) else None
-        if not isinstance(inner, list) or not inner:
-            groups.append(g)
-            continue
-        kept = [h for h in inner if not is_ccbox_hook(h)]
-        if kept:
-            groups.append({**g, "hooks": kept})
-    for m in matchers:
-        groups.append({"matcher": m, "hooks": [{"type": "command", "command": hook_cmd}]})
-    hooks[event] = groups
-tmp = path.with_suffix(path.suffix + ".tmp")
-tmp.write_text(json.dumps(data, indent=2) + "\n")
-tmp.replace(path)
-PY
 
-echo "==> wrote statusLine.command = $CCBOX_BIN and ccbox hooks to $SETTINGS"
+CCBOX_BIN=""
+TRIPLE="$(host_triple)"
+case "$(printf '%s' "${CCBOX_BUILD_FROM_SOURCE:-}" | tr '[:upper:]' '[:lower:]')" in
+  1 | true | yes | on)
+    echo "==> CCBOX_BUILD_FROM_SOURCE is set"
+    install_from_source
+    ;;
+  *)
+    if [[ -z "$TRIPLE" ]]; then
+      echo "==> no prebuilt ccbox for $(uname -s)/$(uname -m); building from source instead"
+      install_from_source
+    elif find_prebuilt "$TRIPLE"; then
+      install_prebuilt || exit 1
+    else
+      echo "==> no prebuilt ccbox for $TRIPLE in the latest release at $RELEASES_URL; building from source instead"
+      install_from_source
+    fi
+    ;;
+esac
+
+if [[ ! -x "$CCBOX_BIN" ]]; then
+  err "could not find the installed ccbox binary at $CCBOX_BIN"
+  exit 1
+fi
+echo "==> installed: $CCBOX_BIN ($("$CCBOX_BIN" --version))"
+
+"$CCBOX_BIN" setup
+
+case ":$PATH:" in
+  *":$(dirname -- "$CCBOX_BIN"):"*) ;;
+  *) echo "==> note: $(dirname -- "$CCBOX_BIN") is not on your PATH; add it to run 'ccbox update' by name" ;;
+esac
 echo "Done. Restart Claude Code to pick up the new statusline."

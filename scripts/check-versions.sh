@@ -32,7 +32,7 @@ with open("plugins/ccbox/.claude-plugin/plugin.json") as f:
 
 want = expected or fields[0][1]
 for name, value in fields:
-    print(f"{name} = {value}")
+    print(f"{name} = {value}", flush=True)
 bad = [(n, v) for n, v in fields if v != want]
 if bad:
     source = f"expected {want} (from the tag)" if expected else f"expected {want} (from Cargo.toml)"
