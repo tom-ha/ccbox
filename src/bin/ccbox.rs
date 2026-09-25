@@ -46,6 +46,8 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some("hook") => return run_hook(),
+        Some("setup") => return run_setup(),
+        Some("update") => return run_update(rest),
         Some("toggle") => return run_toggle(rest),
         Some(verb @ ("show" | "hide" | "flip")) => return run_row_verb(verb, rest),
         Some("status") => return run_status(rest),
@@ -184,6 +186,41 @@ fn main() -> ExitCode {
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn run_setup() -> ExitCode {
+    let exe = env::current_exe().and_then(std::fs::canonicalize);
+    let result = exe
+        .map_err(|e| format!("cannot find this binary: {e}"))
+        .and_then(|exe| ccbox::setup::run(&resolve_claude_dir(), &exe));
+    match result {
+        Ok(report) => {
+            ccbox::update::print_setup_report(&mut io::stdout(), &report);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("ccbox setup: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_update(args: &[String]) -> ExitCode {
+    let args = match ccbox::update::parse_args(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("ccbox update: {e}");
+            print_usage();
+            return ExitCode::from(2);
+        }
+    };
+    match ccbox::update::run(&args, &mut io::stdout()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("ccbox update: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
 fn now_secs() -> f64 {
     std::time::SystemTime::now()
