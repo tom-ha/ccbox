@@ -88,6 +88,7 @@ enum Action {
     /// Main-thread markers only: a background subagent can still be waiting
     /// after the main turn ends.
     ClearMain,
+    ClearAgent,
     ClearAll,
     Ignore,
 }
@@ -105,6 +106,7 @@ fn action(h: &HookInput) -> Action {
         ("PostToolUse" | "PostToolUseFailure" | "PermissionDenied", _) => Action::ToolDone,
         ("UserPromptSubmit" | "Stop", _) => Action::ClearMain,
         ("SessionEnd", _) => Action::ClearAll,
+        ("SubagentStop", _) => Action::ClearAgent,
         _ => Action::Ignore,
     }
 }
@@ -249,11 +251,18 @@ fn moved_on(m: &Marker) -> bool {
     let tail = String::from_utf8_lossy(&bytes);
     tail.lines().rev().any(|ln| {
         let is_turn = ln.contains(r#""type":"user""#) || ln.contains(r#""type":"assistant""#);
-        is_turn
-            && serde_json::from_str::<serde_json::Value>(ln)
-                .ok()
-                .and_then(|v| v.get("timestamp")?.as_str().map(parse_iso_to_epoch))
-                .is_some_and(|ts| ts > cutoff)
+        if !is_turn {
+            return false;
+        }
+        // Abandoning a prompt (Esc, or a rejection) fires no hook and may come
+        // within the grace window, so those records count from `since` itself.
+        let abandoned = ln.contains("[Request interrupted by user")
+            || ln.contains("The user doesn't want to proceed with this tool use");
+        let after = if abandoned { m.since } else { cutoff };
+        serde_json::from_str::<serde_json::Value>(ln)
+            .ok()
+            .and_then(|v| v.get("timestamp")?.as_str().map(parse_iso_to_epoch))
+            .is_some_and(|ts| ts > after)
     })
 }
 
@@ -324,14 +333,23 @@ pub fn apply_hook(
                 let _ = fs::remove_file(p);
             }
         }
+        Action::ClearAgent => {
+            if !h.agent_id.is_empty() {
+                if let Some(p) = marker_path(claude_dir, &h.session_id, &h.agent_id) {
+                    let _ = fs::remove_file(p);
+                }
+            }
+        }
         Action::ClearAll => {
             for p in session_markers(claude_dir, &h.session_id) {
                 let _ = fs::remove_file(p);
             }
         }
         Action::ToolDone => {
-            // The unscoped main marker clears on any main-thread completion; a
-            // scoped one only on its own call. An answered AskUserQuestion
+            // An unscoped marker clears on any main-thread completion, or any
+            // completion at all for a permission prompt (installs without the
+            // PermissionRequest hook can't tell whose it is); a scoped one only
+            // on its own call. An answered AskUserQuestion
             // comes back with rewritten tool_input, so a known tool_use_id is
             // matched alone.
             let paths = [
@@ -340,7 +358,7 @@ pub fn apply_hook(
             ];
             for path in paths.into_iter().flatten() {
                 let finishes = read(&path).is_some_and(|m| {
-                    (!m.scoped && h.agent_id.is_empty())
+                    (!m.scoped && (h.agent_id.is_empty() || m.kind == Kind::Permission))
                         || (m.scoped
                             && m.agent_id == h.agent_id
                             && if m.tool_use_id.is_empty() {
@@ -875,6 +893,86 @@ mod tests {
         assert_eq!(marker_files(d.path()), 1, "main-thread idle marker cleared");
     }
 
+    fn record(kind: &str, text: &str, at: f64) -> String {
+        use chrono::{TimeZone, Utc};
+        let ts = Utc.timestamp_opt(at as i64, 0).unwrap().to_rfc3339();
+        format!("{{\"type\":\"{kind}\",\"timestamp\":\"{ts}\",\"text\":\"{text}\"}}\n")
+    }
+
+    #[test]
+    fn quick_escape_on_a_subagent_prompt_still_clears() {
+        let d = tempdir().unwrap();
+        let main = d.path().join("s1.jsonl");
+        let sub_dir = d.path().join("s1").join("subagents");
+        fs::create_dir_all(&sub_dir).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let since = now - 60.0;
+        fs::write(&main, "").unwrap();
+        fs::write(sub_dir.join("agent-a1.jsonl"), "").unwrap();
+        let mut h = tool("PermissionRequest", "Bash", "s1", "a1", "rm x");
+        h.transcript_path = main.to_string_lossy().into();
+        apply_hook(d.path(), &h, since, || None);
+
+        fs::write(
+            sub_dir.join("agent-a1.jsonl"),
+            record("assistant", "next block", since + 2.0),
+        )
+        .unwrap();
+        assert_eq!(marker_files(d.path()), 1);
+        assert_eq!(
+            load_all(d.path(), now).len(),
+            1,
+            "ordinary record inside the grace window"
+        );
+
+        fs::write(
+            sub_dir.join("agent-a1.jsonl"),
+            record(
+                "user",
+                "[Request interrupted by user for tool use]",
+                since + 2.0,
+            ),
+        )
+        .unwrap();
+        assert!(load_all(d.path(), now).is_empty(), "Esc at +2 s clears");
+    }
+
+    #[test]
+    fn subagent_stop_clears_that_agents_marker_only() {
+        let d = tempdir().unwrap();
+        for agent in ["a1", "b2"] {
+            let mut p = tool("PermissionRequest", "Bash", "s1", agent, "rm x");
+            p.transcript_path = "/nonexistent/s1.jsonl".into();
+            apply_hook(d.path(), &p, 100.0, || None);
+        }
+        let mut stop = hook("SubagentStop", "", "", "s1");
+        stop.agent_id = "a1".into();
+        apply_hook(d.path(), &stop, 110.0, || None);
+        assert_eq!(marker_files(d.path()), 1);
+        assert_eq!(load_all(d.path(), 120.0)[0].1.agent_id, "b2");
+    }
+
+    #[test]
+    fn old_install_permission_marker_clears_on_a_subagent_completion() {
+        let d = tempdir().unwrap();
+        apply_hook(
+            d.path(),
+            &hook("Notification", "permission_prompt", "", "s1"),
+            100.0,
+            || None,
+        );
+        apply_hook(
+            d.path(),
+            &tool("PostToolUse", "Bash", "s1", "a1", "rm x"),
+            110.0,
+            || None,
+        );
+        assert!(load_all(d.path(), 120.0).is_empty());
+    }
+
     #[test]
     fn question_clears_only_on_its_own_tool_call() {
         let d = tempdir().unwrap();
@@ -971,11 +1069,11 @@ mod tests {
     }
 
     #[test]
-    fn notification_only_marker_clears_on_any_main_thread_completion() {
+    fn unscoped_non_permission_marker_clears_only_on_main_thread_completion() {
         let d = tempdir().unwrap();
         apply_hook(
             d.path(),
-            &hook("Notification", "permission_prompt", "", "s1"),
+            &hook("Notification", "elicitation_dialog", "", "s1"),
             10.0,
             || None,
         );

@@ -102,6 +102,7 @@ wanted = {
     "PostToolUseFailure": [""],
     "UserPromptSubmit": [""],
     "Stop": [""],
+    "SubagentStop": [""],
     "SessionEnd": [""],
 }
 hooks = data.setdefault("hooks", {})
