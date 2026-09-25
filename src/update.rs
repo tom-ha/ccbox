@@ -18,6 +18,8 @@ pub struct Args {
     pub force: bool,
 }
 
+pub const HELP_REQUESTED: &str = "help requested";
+
 pub fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut out = Args::default();
     let mut it = args.iter();
@@ -31,14 +33,17 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
                 out.force = true;
                 continue;
             }
+            "-h" | "--help" => return Err(HELP_REQUESTED.to_string()),
             "--version" => it.next().ok_or("--version needs X.Y.Z")?.as_str(),
             other => match other.strip_prefix("--version=") {
                 Some(v) => v,
                 None => return Err(format!("unexpected argument: {other}")),
             },
         };
-        out.version =
-            Some(Version::parse(pinned).ok_or_else(|| format!("--version wants X.Y.Z, got {pinned:?}"))?);
+        out.version = Some(
+            Version::parse(pinned)
+                .ok_or_else(|| format!("--version wants X.Y.Z, got {pinned:?}"))?,
+        );
     }
     Ok(out)
 }
@@ -55,7 +60,12 @@ pub fn run(args: &Args, out: &mut dyn Write) -> Result<(), String> {
         return match which {
             Which::Pinned(v) => Err(format!("release {v} was not found at {base}")),
             Which::Latest => {
-                say(out, &format!("no ccbox release has been published yet; ccbox {installed} is installed"));
+                say(
+                    out,
+                    &format!(
+                        "no ccbox release has been published yet; ccbox {installed} is installed"
+                    ),
+                );
                 if args.check {
                     Ok(())
                 } else {
@@ -145,7 +155,10 @@ fn current_exe() -> Result<PathBuf, String> {
 
 pub fn print_setup_report(out: &mut dyn Write, r: &setup::Report) {
     if !r.changed() {
-        say(out, &format!("{} is already wired for this ccbox", r.settings.display()));
+        say(
+            out,
+            &format!("{} is already wired for this ccbox", r.settings.display()),
+        );
         return;
     }
     say(out, &format!("updated {}:", r.settings.display()));
@@ -153,13 +166,17 @@ pub fn print_setup_report(out: &mut dyn Write, r: &setup::Report) {
         say(out, &format!("  {line}"));
     }
     if let Some(b) = &r.backup {
-        say(out, &format!("  backed up the previous file to {}", b.display()));
+        say(
+            out,
+            &format!("  backed up the previous file to {}", b.display()),
+        );
     }
 }
 
 fn rewire_in_place(out: &mut dyn Write) -> Result<(), String> {
     let exe = current_exe()?;
-    let report = setup::run(&setup::claude_dir(), &exe).map_err(|e| format!("wiring settings.json failed: {e}"))?;
+    let report = setup::run(&setup::claude_dir(), &exe)
+        .map_err(|e| format!("wiring settings.json failed: {e}"))?;
     print_setup_report(out, &report);
     Ok(())
 }
@@ -193,16 +210,19 @@ pub fn install(rel: &Release, exe: &Path) -> Result<(), String> {
     };
     let mut file = create_staging(&staging.path).map_err(|e| {
         format!(
-            "cannot write to {} ({e}), so {} cannot be replaced; re-run install.sh, or run `sudo ccbox update` if it lives in a system directory",
+            "cannot write to {} ({e}), so {} cannot be replaced. Re-run install.sh with CCBOX_BIN_DIR set to a directory you can write to, or update it with elevated privileges and then run `ccbox update` as yourself to rewire your settings.json",
             dir.display(),
             exe.display()
         )
     })?;
 
     let name = release::tarball_name(rel.version, triple);
-    let sums_asset = rel
-        .asset("SHA256SUMS")
-        .ok_or_else(|| format!("release {} has no SHA256SUMS; refusing to install it", rel.version))?;
+    let sums_asset = rel.asset("SHA256SUMS").ok_or_else(|| {
+        format!(
+            "release {} has no SHA256SUMS; refusing to install it",
+            rel.version
+        )
+    })?;
     let tar_asset = rel
         .asset(&name)
         .ok_or_else(|| format!("release {} has no {name}", rel.version))?;
@@ -243,14 +263,20 @@ fn extract_ccbox(tarball: &[u8], dest: &mut fs::File) -> io::Result<()> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
-        let is_ccbox = path.components().map(|c| c.as_os_str()).eq([std::ffi::OsStr::new("ccbox")])
+        let is_ccbox = path
+            .components()
+            .map(|c| c.as_os_str())
+            .eq([std::ffi::OsStr::new("ccbox")])
             || path == Path::new("./ccbox");
         if is_ccbox && entry.header().entry_type().is_file() {
             io::copy(&mut entry, dest)?;
             return Ok(());
         }
     }
-    Err(io::Error::new(io::ErrorKind::NotFound, "no ccbox binary in the archive"))
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "no ccbox binary in the archive",
+    ))
 }
 
 /// Runs the staged binary's `version` so a binary that cannot run here never replaces this one.
@@ -263,7 +289,9 @@ fn probe_version(path: &Path, want: Version) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("the downloaded ccbox does not run on this machine: {e}"))?;
-    let status = child.wait_timeout(PROBE_TIMEOUT).map_err(|e| e.to_string())?;
+    let status = child
+        .wait_timeout(PROBE_TIMEOUT)
+        .map_err(|e| e.to_string())?;
     if status.is_none() {
         let _ = child.kill();
         let _ = child.wait();
@@ -297,14 +325,20 @@ mod tests {
         let got = parse_args(&a(&["--check", "--version", "0.6.0", "--force"])).unwrap();
         assert!(got.check && got.force);
         assert_eq!(got.version, Version::parse("0.6.0"));
-        assert_eq!(parse_args(&a(&["--version=v1.2.3"])).unwrap().version, Version::parse("1.2.3"));
+        assert_eq!(
+            parse_args(&a(&["--version=v1.2.3"])).unwrap().version,
+            Version::parse("1.2.3")
+        );
         assert!(parse_args(&a(&["--version"])).is_err());
         assert!(parse_args(&a(&["--version", "0.6"])).is_err());
         assert!(parse_args(&a(&["--yes"])).is_err());
     }
 
     fn tarball(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default()));
+        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
         for (name, body) in entries {
             let mut h = tar::Header::new_gnu();
             h.set_size(body.len() as u64);
@@ -331,12 +365,18 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join(".ccbox-update.tmp");
         {
-            let _s = Staging { path: p.clone(), keep: false };
+            let _s = Staging {
+                path: p.clone(),
+                keep: false,
+            };
             create_staging(&p).unwrap();
         }
         assert!(!p.exists());
         {
-            let _s = Staging { path: p.clone(), keep: true };
+            let _s = Staging {
+                path: p.clone(),
+                keep: true,
+            };
             create_staging(&p).unwrap();
         }
         assert!(p.exists());

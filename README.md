@@ -30,7 +30,7 @@ A fast, Rust statusline for [Claude Code](https://claude.com/claude-code) — dr
 curl -fsSL https://raw.githubusercontent.com/tom-ha/ccbox/main/install.sh | bash
 ```
 
-This downloads the prebuilt binary for your platform from the [latest release](https://github.com/tom-ha/ccbox/releases/latest), checks its SHA-256 against the release's `SHA256SUMS`, and installs it as `~/.cargo/bin/ccbox`. A checksum mismatch stops the install. With no prebuilt binary for your platform, or no release yet, it builds from source with `cargo install` instead (about a minute). It then runs `ccbox setup`, which patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline (refreshing every 5s) and runs `ccbox hook` for the "needs you" row. Re-running it is safe; other hooks are left alone, and `settings.json` is only rewritten, after a backup to `settings.json.bak.YYYYMMDD-HHMMSS`, when something changes. Restart Claude Code afterwards.
+This downloads the prebuilt binary for your platform from the [latest release](https://github.com/tom-ha/ccbox/releases/latest), checks its SHA-256 against the release's `SHA256SUMS`, and installs it as `~/.cargo/bin/ccbox`. A checksum mismatch stops the install. With no prebuilt binary for your platform, or no release yet, it builds from source with `cargo install` instead (about a minute). Then the installed binary patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline (refreshing every 5s) and calls ccbox's hook for the "needs you" row. Re-running it is safe; other hooks are left alone, and `settings.json` is only rewritten, after a backup to `settings.json.bak.YYYYMMDD-HHMMSS`, when something changes. Restart Claude Code afterwards.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -41,16 +41,16 @@ This downloads the prebuilt binary for your platform from the [latest release](h
 
 Want to read the script before running it? Fetch the same URL without the `| bash` to inspect it (`curl -fsSL https://raw.githubusercontent.com/tom-ha/ccbox/main/install.sh`).
 
-If you'd rather not pipe a script to bash, download `ccbox-<version>-<target>.tar.gz` and `SHA256SUMS` from the [releases page](https://github.com/tom-ha/ccbox/releases), check it with `shasum -a 256 -c SHA256SUMS --ignore-missing`, extract `ccbox` somewhere on your `PATH`, and let it wire itself up:
+If you'd rather not pipe a script to bash, download `ccbox-<version>-<target>.tar.gz` and `SHA256SUMS` from the [releases page](https://github.com/tom-ha/ccbox/releases), check it with `shasum -a 256 -c SHA256SUMS --ignore-missing`, extract `ccbox` somewhere on your `PATH`, and run `ccbox update`, which wires `settings.json` for the binary it runs from (and installs a newer release, if there is one):
 
 ```bash
 tar -xzf ccbox-*-aarch64-apple-darwin.tar.gz -C ~/.cargo/bin ccbox
-~/.cargo/bin/ccbox setup
+~/.cargo/bin/ccbox update
 ```
 
 On macOS, a tarball downloaded with a browser carries the quarantine attribute, and Gatekeeper refuses to run the unsigned binary. Clear it with `xattr -d com.apple.quarantine ~/.cargo/bin/ccbox`. (The installer and `ccbox update` download with curl and ureq, which set no quarantine attribute.)
 
-To build from source instead: `cargo install --git https://github.com/tom-ha/ccbox.git --locked`, then run `ccbox setup`.
+To build from source instead: `cargo install --git https://github.com/tom-ha/ccbox.git --locked`, then run `ccbox update` the same way.
 
 ### Uninstall
 
@@ -76,13 +76,15 @@ After installing, **fully restart Claude Code** (the statusline is wired up at s
 Want to tweak something straight away? Two one-liners worth trying first:
 
 ```bash
-export CLAUDE_STATUSLINE_THEME=tokyonight   # try a different theme
+export CLAUDE_STATUSLINE_THEME=catppuccin-mocha   # try a different theme
 export CCBOX_DENSITY=verbose                # show every available row
 ```
 
 Restart Claude Code after changing env vars — the statusline subprocess inherits its environment from the Claude Code parent, so changes only take effect on the next launch. See **Customize** below for the full list of knobs.
 
 ## Updating
+
+A ccbox installed before the first release (v0.6.0), which was always a source build from `main`, has no `update` command and never shows the notice. Re-run the install one-liner once to move it onto releases; from then on, `ccbox update` does it.
 
 Once a day at most, in the background, ccbox asks GitHub for the latest release. When it is newer than the installed binary, the statusline's bottom border says so:
 
@@ -104,7 +106,7 @@ It downloads the release for your platform, refuses it unless its SHA-256 matche
 | `--version X.Y.Z` | Installs that release instead of the latest. |
 | `--force` | Allows `--version` to go to an older release. |
 
-If the binary lives in a directory you can't write to (say `/usr/local/bin`), `ccbox update` stops and says so; re-run the installer, or use `sudo ccbox update`.
+If the binary lives in a directory you can't write to (say `/usr/local/bin`), `ccbox update` stops and says so. Re-run the installer with `CCBOX_BIN_DIR` set to a directory you can write to; or replace the binary with elevated privileges and then run `ccbox update` as yourself, so it rewires your own `settings.json` rather than root's.
 
 The check runs in a detached `ccbox` process with a 10 s timeout, so the statusline never waits on the network. Its result is cached in `<claude_dir>/ccbox-cache/update-check.json`, shared by every session on the machine; a failed check waits twice as long each time, up to a week. `ccbox status` shows the installed version, the latest release it knows about, and whether the check is on.
 
@@ -270,7 +272,7 @@ The cache is per-cwd (FNV1a-hashed for a stable, filesystem-safe filename) and i
 
 - **Top border** — session ID and time since the session last wrote to its transcript.
 - **Top row** — working directory, git branch with `N changed` (uncommitted files), `N ahead` / `N behind` (commits vs. upstream), and the model with its reasoning effort.
-- **Needs you** — appears only while a session is waiting on you. This session shows a `⏸ NEEDS YOU` badge with what it's waiting for (`permission`, `question`, `your turn`) and for how long; every other waiting session on the machine is listed after it, so any terminal tells you which one is stuck. Driven by Claude Code hooks that `install.sh` registers: `ccbox hook` runs on `PermissionRequest`, `Notification`, and `PreToolUse` for `AskUserQuestion` to mark a session, and on `PostToolUse` / `PostToolUseFailure` / `PermissionDenied` / `SubagentStop` / `UserPromptSubmit` / `Stop` / `SessionEnd` to clear it. Each agent gets its own marker, so parallel subagents waiting at once are tracked separately, and a background subagent's prompt survives the main turn ending. When a session has several, the row shows a blocking prompt ahead of "your turn". A permission marker clears when that same call finishes or fails, or when the agent that asked moves on in its own transcript — which is also how a rejected prompt clears, since Claude Code fires no hook for a rejection. Entries clear themselves when the session's Claude Code process exits, when its transcript shows it has moved on, or — for `your turn`, shown dim because nothing is blocked — after 10 minutes; `permission` and `question` stay until answered. Claude Code hides the statusline during a permission prompt, so that session's own badge isn't visible then — the other terminals still show it.
+- **Needs you** — appears only while a session is waiting on you. This session shows a `⏸ NEEDS YOU` badge with what it's waiting for (`permission`, `question`, `your turn`) and for how long; every other waiting session on the machine is listed after it, so any terminal tells you which one is stuck. Driven by Claude Code hooks that `install.sh` registers: ccbox's hook runs on `PermissionRequest`, `Notification`, and `PreToolUse` for `AskUserQuestion` to mark a session, and on `PostToolUse` / `PostToolUseFailure` / `PermissionDenied` / `SubagentStop` / `UserPromptSubmit` / `Stop` / `SessionEnd` to clear it. Each agent gets its own marker, so parallel subagents waiting at once are tracked separately, and a background subagent's prompt survives the main turn ending. When a session has several, the row shows a blocking prompt ahead of "your turn". A permission marker clears when that same call finishes or fails, or when the agent that asked moves on in its own transcript — which is also how a rejected prompt clears, since Claude Code fires no hook for a rejection. Entries clear themselves when the session's Claude Code process exits, when its transcript shows it has moved on, or — for `your turn`, shown dim because nothing is blocked — after 10 minutes; `permission` and `question` stay until answered. Claude Code hides the statusline during a permission prompt, so that session's own badge isn't visible then — the other terminals still show it.
 - **Bottom border** — `⬆ ccbox <version> available · run ccbox update` when a newer release is out; see **Updating**.
 - **ctx** — tokens currently in the context window, out of the model's window size, and the percentage of the full window used (Claude Code's own `used_percentage`). The colour turns warn/alert as you approach auto-compaction (~75% of the window).
 - **Limits** — on Pro/Max subscriptions: the `session` (5-hour) and `week` (7-day) usage limits, plus per-model weekly limits such as `Fable` with their reset time (`resets 9:30am` within 24 hours — Claude Code's `/usage` threshold — else `resets Mon 12pm`). Each bar fills to the usage %, and a `│` marker shows where usage would be if you spread it evenly over the window. Fill past the marker (usage ahead of that even pace) is drawn red (`▓`). Usage is account-wide (all sessions, plus claude.ai); the marker is purely time. If your current rate would hit the limit before it resets, a red `maxed at ~Fri 1:15pm` forecast appears — from a line fitted through usage samples (logged by every session on this machine) over the last 30 minutes for the session limit and the last 24 hours for weekly limits, so nights and breaks count toward the weekly rate. The forecast stays hidden until there's enough real history: samples spanning at least 5 minutes for the session limit and 4 hours for weekly limits. A limit turns warn at 70%, when it's forecast to run out before reset, or when you're more than 10 points ahead of an even pace; it turns alert at 90%. Once a limit hits 100% and you continue on extra usage, an extra-usage cell appears. If the account data below isn't available, it falls back to an estimate (`~$X`): the list-price cost of everything since the limit was hit, summed across sessions until that window resets. Per-model limits and real extra-usage spend aren't in Claude Code's statusline data, so ccbox asks Claude Code for them: every 5 minutes at most, in the background, it runs `claude -p` with the SDK `get_usage` request — no prompt is sent, so no usage is consumed, and user settings are skipped so none of your hooks run and no transcript is saved. Results are cached in `<claude_dir>/ccbox-cache/account-usage.json` and shared by all sessions. With that data, the extra-usage cell shows your actual spend (`extra usage $130.96 of $500.00`) instead of the estimate. On API billing there are no limits, so the row shows input/output tokens and the `$ sess · $ today` cost cell instead.

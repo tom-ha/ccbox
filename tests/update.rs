@@ -39,7 +39,12 @@ impl FakeReleases {
                     }
                 }
                 h.lock().unwrap().push(path.clone());
-                let (status, body) = r.lock().unwrap().get(&path).cloned().unwrap_or((404, b"{}".to_vec()));
+                let (status, body) = r
+                    .lock()
+                    .unwrap()
+                    .get(&path)
+                    .cloned()
+                    .unwrap_or((404, b"{}".to_vec()));
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -48,11 +53,16 @@ impl FakeReleases {
                 let _ = stream.write_all(&body);
             }
         });
-        FakeReleases { base, routes, hits }
+        let fake = FakeReleases { base, routes, hits };
+        fake.route(&fake.path(""), 200, "{}");
+        fake
     }
 
     fn route(&self, path: &str, status: u16, body: impl Into<Vec<u8>>) {
-        self.routes.lock().unwrap().insert(path.to_string(), (status, body.into()));
+        self.routes
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), (status, body.into()));
     }
 
     fn url(&self, name: &str) -> String {
@@ -83,9 +93,17 @@ impl FakeReleases {
         })
         .to_string();
         self.route(&self.path("/releases/latest"), 200, release.clone());
-        self.route(&self.path(&format!("/releases/tags/v{version}")), 200, release);
+        self.route(
+            &self.path(&format!("/releases/tags/v{version}")),
+            200,
+            release,
+        );
         self.route(&self.path(&format!("/download/{name}")), 200, tarball);
-        self.route(&self.path("/download/SHA256SUMS"), 200, format!("{digest}  {name}\n"));
+        self.route(
+            &self.path("/download/SHA256SUMS"),
+            200,
+            format!("{digest}  {name}\n"),
+        );
     }
 }
 
@@ -124,7 +142,11 @@ impl Install {
         fs::create_dir_all(&bin).unwrap();
         let exe = bin.join("ccbox");
         fs::copy(env!("CARGO_BIN_EXE_ccbox"), &exe).unwrap();
-        Install { _dir: dir, exe, claude }
+        Install {
+            _dir: dir,
+            exe,
+            claude,
+        }
     }
 
     fn run(&self, fake: &FakeReleases, args: &[&str]) -> Output {
@@ -146,7 +168,11 @@ impl Install {
 }
 
 fn text(o: &Output) -> String {
-    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    )
 }
 
 fn sha(p: &Path) -> String {
@@ -168,7 +194,11 @@ fn update_replaces_the_binary_and_runs_the_new_setup() {
     assert!(t.contains(&format!("setup ran for {next}")), "{t}");
     assert!(t.contains("a test release"), "{t}");
     assert_eq!(fs::read(&inst.exe).unwrap(), binary);
-    assert!(inst.staging_files().is_empty(), "{:?}", inst.staging_files());
+    assert!(
+        inst.staging_files().is_empty(),
+        "{:?}",
+        inst.staging_files()
+    );
 }
 
 #[test]
@@ -184,7 +214,11 @@ fn a_checksum_mismatch_leaves_the_binary_alone() {
     assert!(!out.status.success(), "{t}");
     assert!(t.contains("checksum mismatch"), "{t}");
     assert_eq!(sha(&inst.exe), before);
-    assert!(inst.staging_files().is_empty(), "{:?}", inst.staging_files());
+    assert!(
+        inst.staging_files().is_empty(),
+        "{:?}",
+        inst.staging_files()
+    );
 }
 
 #[test]
@@ -197,10 +231,18 @@ fn check_reports_and_writes_nothing() {
 
     let out = inst.run(&fake, &["update", "--check"]);
     assert!(out.status.success());
-    assert_eq!(text(&out).trim(), format!("{INSTALLED} -> {next} available"));
+    assert_eq!(
+        text(&out).trim(),
+        format!("{INSTALLED} -> {next} available")
+    );
     assert_eq!(sha(&inst.exe), before);
     assert!(!inst.claude.exists(), "--check wrote the config dir");
-    assert!(!fake.hits.lock().unwrap().iter().any(|p| p.contains("/download/")));
+    assert!(!fake
+        .hits
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|p| p.contains("/download/")));
 }
 
 #[test]
@@ -213,7 +255,10 @@ fn already_current_rewires_settings_and_keeps_the_binary() {
     let out = inst.run(&fake, &["update"]);
     let t = text(&out);
     assert!(out.status.success(), "{t}");
-    assert!(t.contains(&format!("already on {INSTALLED}; no update performed")), "{t}");
+    assert!(
+        t.contains(&format!("already on {INSTALLED}; no update performed")),
+        "{t}"
+    );
     assert_eq!(sha(&inst.exe), before);
     let settings = fs::read_to_string(inst.claude.join("settings.json")).unwrap();
     assert!(settings.contains("\"refreshInterval\": 5"), "{settings}");
@@ -242,16 +287,35 @@ fn downgrade_needs_force_and_a_missing_version_is_not_found() {
 
     let out = inst.run(&fake, &["update", "--version", old]);
     assert!(!out.status.success());
-    assert!(text(&out).contains("downgrades require --force"), "{}", text(&out));
+    assert!(
+        text(&out).contains("downgrades require --force"),
+        "{}",
+        text(&out)
+    );
     assert_eq!(sha(&inst.exe), before);
 
     let out = inst.run(&fake, &["update", "--version", "9.9.9"]);
     assert!(!out.status.success());
-    assert!(text(&out).contains("release 9.9.9 was not found"), "{}", text(&out));
+    assert!(
+        text(&out).contains("release 9.9.9 was not found"),
+        "{}",
+        text(&out)
+    );
 
     let out = inst.run(&fake, &["update", "--version", old, "--force"]);
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(fs::read(&inst.exe).unwrap(), fake_binary(old));
+}
+
+#[test]
+fn a_missing_repository_is_an_error_not_no_release() {
+    let fake = FakeReleases::start();
+    fake.route(&fake.path(""), 404, "{}");
+    let inst = Install::new();
+    let out = inst.run(&fake, &["update", "--check"]);
+    let t = text(&out);
+    assert!(!out.status.success(), "{t}");
+    assert!(t.contains("no such repository"), "{t}");
 }
 
 #[test]

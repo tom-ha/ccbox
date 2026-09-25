@@ -39,7 +39,7 @@ The state file at `<claude_dir>/ccbox-toggles.json` takes precedence over `CCBOX
    ```
    A binary older than the `ccbox <verb>` commands exits 2 on `ccbox version`; it gets the same arguments as `ccbox toggle …`.
 
-2. Print the command's stdout back to the user verbatim. If exit code is non-zero, surface stderr too.
+2. Print the command's output back to the user verbatim, stdout and stderr both (usage and help go to stderr), and mention a non-zero exit code.
 
 3. If the user passed no arguments, the binary prints its own usage; relay that.
 

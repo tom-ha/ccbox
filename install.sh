@@ -53,18 +53,19 @@ json_urls() {
   grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/'
 }
 
-# Sets TAR_URL/SUMS_URL for triple $1 from the latest release; returns 1 if it has no such tarball.
+# Sets TAR_URL/SUMS_URL for triple $1 from the latest release. Returns 1 when no
+# release is found, 2 when it has no tarball for $1, 3 when it has no SHA256SUMS.
 find_prebuilt() {
-  local triple="$1" json tag name
+  local triple="$1" json tag
   json="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$RELEASES_URL/releases/latest" 2>/dev/null)" || return 1
   tag="$(printf '%s' "$json" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed 's/.*"\([^"]*\)"$/\1/')"
   [[ -n "$tag" ]] || return 1
-  name="ccbox-${tag#v}-$triple.tar.gz"
-  TAR_URL="$(printf '%s' "$json" | json_urls | grep "/$name\$" | head -n1 || true)"
-  SUMS_URL="$(printf '%s' "$json" | json_urls | grep '/SHA256SUMS$' | head -n1 || true)"
-  TAR_NAME="$name"
   RELEASE_TAG="$tag"
-  [[ -n "$TAR_URL" && -n "$SUMS_URL" ]]
+  TAR_NAME="ccbox-${tag#v}-$triple.tar.gz"
+  TAR_URL="$(printf '%s' "$json" | json_urls | grep "/$TAR_NAME\$" | head -n1 || true)"
+  SUMS_URL="$(printf '%s' "$json" | json_urls | grep '/SHA256SUMS$' | head -n1 || true)"
+  [[ -n "$TAR_URL" ]] || return 2
+  [[ -n "$SUMS_URL" ]] || return 3
 }
 
 install_prebuilt() {
@@ -130,11 +131,24 @@ case "$(printf '%s' "${CCBOX_BUILD_FROM_SOURCE:-}" | tr '[:upper:]' '[:lower:]')
     if [[ -z "$TRIPLE" ]]; then
       echo "==> no prebuilt ccbox for $(uname -s)/$(uname -m); building from source instead"
       install_from_source
-    elif find_prebuilt "$TRIPLE"; then
-      install_prebuilt || exit 1
     else
-      echo "==> no prebuilt ccbox for $TRIPLE in the latest release at $RELEASES_URL; building from source instead"
-      install_from_source
+      found=0
+      find_prebuilt "$TRIPLE" || found=$?
+      case "$found" in
+        0) install_prebuilt || exit 1 ;;
+        1)
+          echo "==> no ccbox release found at $RELEASES_URL; building from source instead"
+          install_from_source
+          ;;
+        2)
+          echo "==> release $RELEASE_TAG has no prebuilt ccbox for $TRIPLE; building from source instead"
+          install_from_source
+          ;;
+        *)
+          err "release $RELEASE_TAG has $TAR_NAME but no SHA256SUMS; not installing an unverified binary"
+          exit 1
+          ;;
+      esac
     fi
     ;;
 esac

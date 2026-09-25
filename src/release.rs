@@ -101,21 +101,38 @@ pub fn agent(timeout: Duration) -> ureq::Agent {
         .into()
 }
 
-/// `Ok(None)`: the source has no such release (HTTP 404).
-pub fn fetch_release(agent: &ureq::Agent, base: &str, which: Which) -> Result<Option<Release>, String> {
+fn api_get(agent: &ureq::Agent, url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
+    agent
+        .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .call()
+        .map_err(|e| format!("{url}: {e}"))
+}
+
+/// `Ok(None)`: the repository exists and has no such release.
+pub fn fetch_release(
+    agent: &ureq::Agent,
+    base: &str,
+    which: Which,
+) -> Result<Option<Release>, String> {
     let url = match which {
         Which::Latest => format!("{base}/releases/latest"),
         Which::Pinned(v) => format!("{base}/releases/tags/v{v}"),
     };
-    let mut resp = agent
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .call()
-        .map_err(|e| format!("{url}: {e}"))?;
+    let mut resp = api_get(agent, &url)?;
     match resp.status().as_u16() {
         200 => {}
-        404 => return Ok(None),
+        404 => {
+            let repo = api_get(agent, base)?.status().as_u16();
+            return match repo {
+                200 => Ok(None),
+                404 => Err(format!(
+                    "{base}: HTTP 404; no such repository (check CCBOX_RELEASES_URL)"
+                )),
+                code => Err(format!("{base}: HTTP {code}")),
+            };
+        }
         code => return Err(format!("{url}: HTTP {code}")),
     }
     let body = resp
@@ -123,12 +140,15 @@ pub fn fetch_release(agent: &ureq::Agent, base: &str, which: Which) -> Result<Op
         .read_to_string()
         .map_err(|e| format!("{url}: {e}"))?;
     let json: Value = serde_json::from_str(&body).map_err(|e| format!("{url}: {e}"))?;
-    parse_release(&json).map(Some).map_err(|e| format!("{url}: {e}"))
+    parse_release(&json)
+        .map(Some)
+        .map_err(|e| format!("{url}: {e}"))
 }
 
 pub fn parse_release(json: &Value) -> Result<Release, String> {
     let tag = json["tag_name"].as_str().ok_or("release has no tag_name")?;
-    let version = Version::parse(tag).ok_or_else(|| format!("release tag {tag:?} is not vX.Y.Z"))?;
+    let version =
+        Version::parse(tag).ok_or_else(|| format!("release tag {tag:?} is not vX.Y.Z"))?;
     let assets = json["assets"]
         .as_array()
         .map(|a| {
@@ -220,8 +240,14 @@ mod tests {
     fn triple_mapping_covers_the_four_release_targets() {
         assert_eq!(triple_for("macos", "aarch64"), Some("aarch64-apple-darwin"));
         assert_eq!(triple_for("macos", "x86_64"), Some("x86_64-apple-darwin"));
-        assert_eq!(triple_for("linux", "x86_64"), Some("x86_64-unknown-linux-musl"));
-        assert_eq!(triple_for("linux", "aarch64"), Some("aarch64-unknown-linux-musl"));
+        assert_eq!(
+            triple_for("linux", "x86_64"),
+            Some("x86_64-unknown-linux-musl")
+        );
+        assert_eq!(
+            triple_for("linux", "aarch64"),
+            Some("aarch64-unknown-linux-musl")
+        );
         assert_eq!(triple_for("windows", "x86_64"), None);
         assert_eq!(triple_for("linux", "riscv64"), None);
         assert_eq!(triple_for("freebsd", "x86_64"), None);
@@ -229,9 +255,32 @@ mod tests {
 
     #[test]
     fn version_parse_accepts_x_y_z_and_a_v_prefix_only() {
-        assert_eq!(v("0.6.0"), Version { major: 0, minor: 6, patch: 0 });
-        assert_eq!(v("v10.20.30"), Version { major: 10, minor: 20, patch: 30 });
-        for bad in ["", "0.6", "0.6.0.1", "1.2.x", "1.2.3-rc1", "v", "1..3", "+1.2.3"] {
+        assert_eq!(
+            v("0.6.0"),
+            Version {
+                major: 0,
+                minor: 6,
+                patch: 0
+            }
+        );
+        assert_eq!(
+            v("v10.20.30"),
+            Version {
+                major: 10,
+                minor: 20,
+                patch: 30
+            }
+        );
+        for bad in [
+            "",
+            "0.6",
+            "0.6.0.1",
+            "1.2.x",
+            "1.2.3-rc1",
+            "v",
+            "1..3",
+            "+1.2.3",
+        ] {
             assert_eq!(Version::parse(bad), None, "{bad:?}");
         }
     }
@@ -254,17 +303,26 @@ mod tests {
     #[test]
     fn sha256sums_parse_and_lookup() {
         let d = "a".repeat(64);
-        let text = format!("{d}  ccbox-1.2.3-aarch64-apple-darwin.tar.gz\n\n{}  *other.tar.gz\n", "B".repeat(64));
+        let text = format!(
+            "{d}  ccbox-1.2.3-aarch64-apple-darwin.tar.gz\n\n{}  *other.tar.gz\n",
+            "B".repeat(64)
+        );
         let parsed = parse_sha256sums(&text).unwrap();
         assert_eq!(
             parsed,
             vec![
-                (d.clone(), "ccbox-1.2.3-aarch64-apple-darwin.tar.gz".to_string()),
+                (
+                    d.clone(),
+                    "ccbox-1.2.3-aarch64-apple-darwin.tar.gz".to_string()
+                ),
                 ("b".repeat(64), "other.tar.gz".to_string()),
             ]
         );
         assert!(parse_sha256sums("abc  x.tar.gz").is_err(), "short digest");
-        assert!(parse_sha256sums(&format!("{}  x", "g".repeat(64))).is_err(), "not hex");
+        assert!(
+            parse_sha256sums(&format!("{}  x", "g".repeat(64))).is_err(),
+            "not hex"
+        );
         assert!(parse_sha256sums(&d).is_err(), "no name");
     }
 

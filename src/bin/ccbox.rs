@@ -215,6 +215,10 @@ fn run_setup() -> ExitCode {
 fn run_update(args: &[String]) -> ExitCode {
     let args = match ccbox::update::parse_args(args) {
         Ok(a) => a,
+        Err(e) if e == ccbox::update::HELP_REQUESTED => {
+            print_help();
+            return ExitCode::SUCCESS;
+        }
         Err(e) => {
             eprintln!("ccbox update: {e}");
             print_usage();
@@ -293,8 +297,20 @@ fn run_toggle(args: &[String]) -> ExitCode {
     let current = toggles::load(&claude_dir);
 
     match args.first().map(String::as_str) {
-        Some("show") => apply_set(LEGACY_TOGGLE_PREFIX, &claude_dir, current, args.get(1), Some(true)),
-        Some("hide") => apply_set(LEGACY_TOGGLE_PREFIX, &claude_dir, current, args.get(1), Some(false)),
+        Some("show") => apply_set(
+            LEGACY_TOGGLE_PREFIX,
+            &claude_dir,
+            current,
+            args.get(1),
+            Some(true),
+        ),
+        Some("hide") => apply_set(
+            LEGACY_TOGGLE_PREFIX,
+            &claude_dir,
+            current,
+            args.get(1),
+            Some(false),
+        ),
         Some("flip") => apply_flip(
             LEGACY_TOGGLE_PREFIX,
             &claude_dir,
@@ -384,13 +400,22 @@ fn run_status(args: &[String]) -> ExitCode {
     let claude_dir = resolve_claude_dir();
     let env_tasks = parse_bool_tristate(env::var("CCBOX_SHOW_TASKS").ok().as_deref());
     let env_subs = parse_bool_tristate(env::var("CCBOX_SHOW_SUBAGENTS").ok().as_deref());
-    print_status(&toggles::load(&claude_dir), env_tasks, env_subs, resolve_density());
+    print_status(
+        &toggles::load(&claude_dir),
+        env_tasks,
+        env_subs,
+        resolve_density(),
+    );
     let cache = ccbox::data::update_check::read_cache(&claude_dir);
     let latest = if cache.checked_at <= 0.0 {
         "unknown (not checked yet)".to_string()
     } else {
         let t = chrono::DateTime::from_timestamp(cache.checked_at as i64, 0)
-            .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
             .unwrap_or_default();
         match (&cache.latest, cache.newer_than_installed()) {
             (Some(v), Some(_)) => format!("{v} (checked {t}; run ccbox update)"),
@@ -403,7 +428,11 @@ fn run_status(args: &[String]) -> ExitCode {
     println!("latest        {latest}");
     println!(
         "update check  {}",
-        if update_check_enabled() { "on" } else { "off (CCBOX_UPDATE_CHECK)" }
+        if update_check_enabled() {
+            "on"
+        } else {
+            "off (CCBOX_UPDATE_CHECK)"
+        }
     );
     ExitCode::SUCCESS
 }

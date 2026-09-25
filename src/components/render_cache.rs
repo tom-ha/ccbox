@@ -21,9 +21,9 @@ use crate::data::account_usage::{self, AccountUsage};
 use crate::data::waiting::{self, Marker};
 use crate::data::{session_name, subscription_marker};
 use crate::data::task_list::TaskList;
-use crate::data::update_check::{self, Cache as UpdateCheck};
 use crate::data::token_log::TokenLog;
 use crate::data::transcript_usage::TranscriptUsage;
+use crate::data::update_check::{self, Cache as UpdateCheck};
 use crate::data::user_messages::last_user_prompt_ts;
 
 use super::context::ComponentContext;

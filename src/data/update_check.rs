@@ -132,7 +132,12 @@ pub fn run_check_with(
     if mtime_secs(&lock).is_some_and(|t| !recent(t, now, LOCK_STALE_SECS)) {
         let _ = fs::remove_file(&lock);
     }
-    if OpenOptions::new().write(true).create_new(true).open(&lock).is_err() {
+    if OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+        .is_err()
+    {
         return;
     }
     let mut cache = read_cache(claude_dir);
@@ -189,22 +194,53 @@ mod tests {
     #[test]
     fn due_once_a_day_with_backoff_and_clock_skew() {
         assert!(check_due(&Cache::default(), T0), "never checked");
-        assert!(!check_due(&cache(T0, 0, None), T0 + DAY - 1.0), "checked today");
+        assert!(
+            !check_due(&cache(T0, 0, None), T0 + DAY - 1.0),
+            "checked today"
+        );
         assert!(check_due(&cache(T0, 0, None), T0 + DAY), "a day later");
-        assert!(!check_due(&cache(T0, 1, None), T0 + DAY + 1.0), "backing off after a failure");
-        assert!(check_due(&cache(T0, 1, None), T0 + 2.0 * DAY), "backoff over");
-        assert!(!check_due(&cache(T0, 9, None), T0 + 6.9 * DAY), "capped backoff not over");
-        assert!(check_due(&cache(T0, 9, None), T0 + 7.0 * DAY), "capped at a week");
-        assert!(check_due(&cache(T0 + 3600.0, 0, None), T0), "checked in the future");
-        assert!(!check_due(&cache(T0 + 1.0, 0, None), T0), "within clock slack");
+        assert!(
+            !check_due(&cache(T0, 1, None), T0 + DAY + 1.0),
+            "backing off after a failure"
+        );
+        assert!(
+            check_due(&cache(T0, 1, None), T0 + 2.0 * DAY),
+            "backoff over"
+        );
+        assert!(
+            !check_due(&cache(T0, 9, None), T0 + 6.9 * DAY),
+            "capped backoff not over"
+        );
+        assert!(
+            check_due(&cache(T0, 9, None), T0 + 7.0 * DAY),
+            "capped at a week"
+        );
+        assert!(
+            check_due(&cache(T0 + 3600.0, 0, None), T0),
+            "checked in the future"
+        );
+        assert!(
+            !check_due(&cache(T0 + 1.0, 0, None), T0),
+            "within clock slack"
+        );
     }
 
     #[test]
     fn chip_only_for_a_strictly_newer_release() {
         let installed = Version::installed();
-        let newer = Version { major: installed.major + 1, minor: 0, patch: 0 };
-        assert_eq!(cache(T0, 0, Some(&newer.to_string())).newer_than_installed(), Some(newer));
-        assert_eq!(cache(T0, 0, Some(&installed.to_string())).newer_than_installed(), None);
+        let newer = Version {
+            major: installed.major + 1,
+            minor: 0,
+            patch: 0,
+        };
+        assert_eq!(
+            cache(T0, 0, Some(&newer.to_string())).newer_than_installed(),
+            Some(newer)
+        );
+        assert_eq!(
+            cache(T0, 0, Some(&installed.to_string())).newer_than_installed(),
+            None
+        );
         assert_eq!(cache(T0, 0, Some("0.0.1")).newer_than_installed(), None);
         assert_eq!(cache(T0, 0, None).newer_than_installed(), None);
         assert_eq!(cache(T0, 0, Some("garbage")).newer_than_installed(), None);
@@ -229,16 +265,27 @@ mod tests {
         let marker = spawn_marker(d.path());
         let first = fs::read_to_string(&marker).unwrap();
         load(d.path(), now + 1.0, true);
-        assert_eq!(fs::read_to_string(&marker).unwrap(), first, "spawn still pending");
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            first,
+            "spawn still pending"
+        );
         load(d.path(), now + SPAWN_GRACE_SECS + 1.0, true);
-        assert_ne!(fs::read_to_string(&marker).unwrap(), first, "grace over, spawned again");
+        assert_ne!(
+            fs::read_to_string(&marker).unwrap(),
+            first,
+            "grace over, spawned again"
+        );
     }
 
     #[test]
     fn load_does_not_spawn_when_the_cache_is_fresh() {
         let d = tempfile::tempdir().unwrap();
         run_check_with(d.path(), T0, true, || Ok(Some("9.9.9".into())));
-        assert_eq!(load(d.path(), T0 + 60.0, true), Some(cache(T0, 0, Some("9.9.9"))));
+        assert_eq!(
+            load(d.path(), T0 + 60.0, true),
+            Some(cache(T0, 0, Some("9.9.9")))
+        );
         assert!(!spawn_marker(d.path()).exists());
     }
 
@@ -266,7 +313,9 @@ mod tests {
         run_check_with(d.path(), T0, true, || Ok(Some("9.9.9".into())));
         run_check_with(d.path(), T0 + DAY, true, || Err("offline".into()));
         assert_eq!(read_cache(d.path()), cache(T0 + DAY, 1, Some("9.9.9")));
-        run_check_with(d.path(), T0 + 2.0 * DAY, true, || panic!("still backing off"));
+        run_check_with(d.path(), T0 + 2.0 * DAY, true, || {
+            panic!("still backing off")
+        });
         run_check_with(d.path(), T0 + 3.0 * DAY, true, || Ok(None));
         assert_eq!(read_cache(d.path()), cache(T0 + 3.0 * DAY, 0, None));
     }
@@ -278,7 +327,9 @@ mod tests {
         fs::write(lock_path(d.path()), "").unwrap();
         let now = mtime_secs(&lock_path(d.path())).unwrap();
         run_check_with(d.path(), now, true, || panic!("lock is held"));
-        run_check_with(d.path(), now + LOCK_STALE_SECS + 1.0, true, || Ok(Some("1.2.3".into())));
+        run_check_with(d.path(), now + LOCK_STALE_SECS + 1.0, true, || {
+            Ok(Some("1.2.3".into()))
+        });
         assert_eq!(read_cache(d.path()).latest.as_deref(), Some("1.2.3"));
     }
 }

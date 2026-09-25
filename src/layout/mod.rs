@@ -189,12 +189,9 @@ pub fn render_layout(spec: &LayoutSpec, r: &Renderer) -> Vec<String> {
                 spec.fill,
                 row.pill.as_ref(),
             )),
-            RowKind::BottomBorder => out.push(border.border_bottom(
-                spec.width,
-                &row.ups,
-                spec.fill,
-                &row.right_chips,
-            )),
+            RowKind::BottomBorder => {
+                out.push(border.border_bottom(spec.width, &row.ups, spec.fill, &row.right_chips))
+            }
             RowKind::Separator | RowKind::SeparatorSeam => {
                 out.push(border.border_separator(spec.width, &row.ups, spec.fill, &row.left_chip))
             }

@@ -34,7 +34,11 @@ impl Component for Footer {
 
     fn render(&self, ctx: &ComponentContext) -> ComponentOutput {
         let mut row = RowSpec::new(RowKind::BottomBorder);
-        if let Some(latest) = ctx.data.update_check(ctx).and_then(|c| c.newer_than_installed()) {
+        if let Some(latest) = ctx
+            .data
+            .update_check(ctx)
+            .and_then(|c| c.newer_than_installed())
+        {
             row.right_chips = update_chips(ctx.renderer.theme, latest);
         }
         ComponentOutput {
@@ -88,14 +92,31 @@ mod tests {
     fn chip_shows_for_a_newer_release_at_every_layout_and_theme() {
         let latest = newer();
         let (_d, env) = env_with_latest(Some(&latest), true);
-        for theme in [&CLAUDE_DARK, &CLAUDE_LIGHT, &CATPPUCCIN_LATTE, &CATPPUCCIN_MOCHA] {
+        for theme in [
+            &CLAUDE_DARK,
+            &CLAUDE_LIGHT,
+            &CATPPUCCIN_LATTE,
+            &CATPPUCCIN_MOCHA,
+        ] {
             for width in [40, 44, 54, 55, 64, 79, 80, 134, 200] {
                 let row = bottom_row(&env, width, theme);
-                assert_eq!(visible_width(&row), width as usize, "{} width={width}", theme.name);
+                assert_eq!(
+                    visible_width(&row),
+                    width as usize,
+                    "{} width={width}",
+                    theme.name
+                );
                 let plain = strip_ansi(&row);
-                assert!(plain.contains(&format!("⬆ ccbox {latest}")), "{} width={width}: {plain}", theme.name);
+                assert!(
+                    plain.contains(&format!("⬆ ccbox {latest}")),
+                    "{} width={width}: {plain}",
+                    theme.name
+                );
                 if width >= 60 {
-                    assert!(plain.contains("available · run ccbox update"), "width={width}: {plain}");
+                    assert!(
+                        plain.contains("available · run ccbox update"),
+                        "width={width}: {plain}"
+                    );
                 }
             }
         }
@@ -113,8 +134,14 @@ mod tests {
             let (_d, env) = env_with_latest(latest, enabled);
             let raw = bottom_row(&env, 134, &CLAUDE_DARK);
             let row = strip_ansi(&raw);
-            assert!(!row.contains('⬆'), "latest={latest:?} enabled={enabled}: {row}");
-            assert!(row.chars().skip(1).take(132).all(|c| c == '─' || c == '┴'), "{row}");
+            assert!(
+                !row.contains('⬆'),
+                "latest={latest:?} enabled={enabled}: {row}"
+            );
+            assert!(
+                row.chars().skip(1).take(132).all(|c| c == '─' || c == '┴'),
+                "{row}"
+            );
         }
     }
 
@@ -126,6 +153,10 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, ["update-check.json"], "fresh cache, so no spawn marker");
+        assert_eq!(
+            names,
+            ["update-check.json"],
+            "fresh cache, so no spawn marker"
+        );
     }
 }

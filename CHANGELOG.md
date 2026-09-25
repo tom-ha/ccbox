@@ -29,6 +29,9 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
 
 ### Changed
 
+- **Upgrading from a source build:** a ccbox installed before this release has no
+  `ccbox update`. Re-run the install one-liner once; later releases arrive
+  through `ccbox update`.
 - Row toggles are verbs: `ccbox show|hide|flip tasks|subagents`. `/ccbox`
   passes its arguments straight to `ccbox`. `ccbox toggle …` still works.
 - `install.sh` installs the prebuilt binary and verifies its checksum, and

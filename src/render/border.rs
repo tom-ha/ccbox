@@ -445,14 +445,21 @@ mod tests {
     }
 
     fn chips() -> Vec<String> {
-        vec![" long chip text ".to_string(), " mid ".to_string(), " s ".to_string()]
+        vec![
+            " long chip text ".to_string(),
+            " mid ".to_string(),
+            " s ".to_string(),
+        ]
     }
 
     #[test]
     fn bottom_chip_right_anchors_the_longest_that_fits() {
         let s = br().border_bottom(40, &[], 1.0, &chips());
         assert_eq!(visible_width(&s), 40);
-        assert!(crate::ansi::strip_ansi(&s).ends_with("─ long chip text ╯"), "{s:?}");
+        assert!(
+            crate::ansi::strip_ansi(&s).ends_with("─ long chip text ╯"),
+            "{s:?}"
+        );
         let s = br().border_bottom(12, &[], 1.0, &chips());
         assert_eq!(crate::ansi::strip_ansi(&s), "╰───── mid ╯");
         let s = br().border_bottom(6, &[], 1.0, &chips());

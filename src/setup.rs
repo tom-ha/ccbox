@@ -104,7 +104,11 @@ fn posix_name(p: &str) -> &str {
 }
 
 pub fn is_ccbox_hook(h: &Value) -> bool {
-    let Some(cmd) = h.as_object().and_then(|o| o.get("command")).and_then(Value::as_str) else {
+    let Some(cmd) = h
+        .as_object()
+        .and_then(|o| o.get("command"))
+        .and_then(Value::as_str)
+    else {
         return false;
     };
     match shlex_split(cmd).as_deref() {
@@ -124,7 +128,8 @@ pub fn wire(data: &mut Value, ccbox: &str) -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
     let quoted = shlex_quote(ccbox);
 
-    let status_line = json!({"type": "command", "command": quoted, "refreshInterval": REFRESH_INTERVAL});
+    let status_line =
+        json!({"type": "command", "command": quoted, "refreshInterval": REFRESH_INTERVAL});
     match obj.insert("statusLine".to_string(), status_line.clone()) {
         Some(prev) if prev == status_line => {}
         Some(prev) => lines.push(format!("set statusLine to {quoted} (was {prev})")),
@@ -149,12 +154,19 @@ pub fn wire(data: &mut Value, ccbox: &str) -> Result<Vec<String>, String> {
         let mut had_ccbox = false;
         let mut groups = Vec::new();
         for g in existing {
-            let inner = g.get("hooks").and_then(Value::as_array).filter(|i| !i.is_empty());
+            let inner = g
+                .get("hooks")
+                .and_then(Value::as_array)
+                .filter(|i| !i.is_empty());
             let Some(inner) = inner else {
                 groups.push(g);
                 continue;
             };
-            let kept: Vec<Value> = inner.iter().filter(|h| !is_ccbox_hook(h)).cloned().collect();
+            let kept: Vec<Value> = inner
+                .iter()
+                .filter(|h| !is_ccbox_hook(h))
+                .cloned()
+                .collect();
             had_ccbox |= kept.len() < inner.len();
             if !kept.is_empty() {
                 let mut g = g.as_object().expect("has hooks").clone();
@@ -206,7 +218,11 @@ impl serde_json::ser::Formatter for PyFormatter<'_> {
         end_object_value,
     );
 
-    fn write_string_fragment<W: ?Sized + Write>(&mut self, w: &mut W, fragment: &str) -> io::Result<()> {
+    fn write_string_fragment<W: ?Sized + Write>(
+        &mut self,
+        w: &mut W,
+        fragment: &str,
+    ) -> io::Result<()> {
         for c in fragment.chars() {
             if (' '..='~').contains(&c) {
                 w.write_all(&[c as u8])?;
@@ -238,12 +254,25 @@ fn python_float_repr(f: f64) -> String {
         } else if decpt >= n {
             format!("{digits}{}.0", "0".repeat((decpt - n) as usize))
         } else {
-            format!("{}.{}", &digits[..decpt as usize], &digits[decpt as usize..])
+            format!(
+                "{}.{}",
+                &digits[..decpt as usize],
+                &digits[decpt as usize..]
+            )
         }
     } else {
-        let frac = if n > 1 { format!(".{}", &digits[1..]) } else { String::new() };
+        let frac = if n > 1 {
+            format!(".{}", &digits[1..])
+        } else {
+            String::new()
+        };
         let e = decpt - 1;
-        format!("{}{frac}e{}{:02}", &digits[..1], if e < 0 { '-' } else { '+' }, e.abs())
+        format!(
+            "{}{frac}e{}{:02}",
+            &digits[..1],
+            if e < 0 { '-' } else { '+' },
+            e.abs()
+        )
     };
     format!("{sign}{body}")
 }
@@ -291,7 +320,11 @@ pub fn run(claude_dir: &Path, ccbox: &Path) -> Result<Report, String> {
     let before = data.clone();
     let ccbox = ccbox.to_str().ok_or("the ccbox path is not valid UTF-8")?;
     let lines = wire(&mut data, ccbox)?;
-    let mut report = Report { settings: settings.clone(), lines, backup: None };
+    let mut report = Report {
+        settings: settings.clone(),
+        lines,
+        backup: None,
+    };
     if existed && data == before {
         report.lines.clear();
         return Ok(report);
@@ -301,8 +334,13 @@ pub fn run(claude_dir: &Path, ccbox: &Path) -> Result<Report, String> {
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     if existed {
         let backup = backup_path(&target);
-        fs::copy(&target, &backup)
-            .map_err(|e| format!("cannot back up {} to {}: {e}", settings.display(), backup.display()))?;
+        fs::copy(&target, &backup).map_err(|e| {
+            format!(
+                "cannot back up {} to {}: {e}",
+                settings.display(),
+                backup.display()
+            )
+        })?;
         report.backup = Some(backup);
     }
     write_atomic(&target, to_python_json(&data).as_bytes())
@@ -314,13 +352,22 @@ fn backup_path(target: &Path) -> PathBuf {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let base = format!("{}.bak.{stamp}", target.display());
     (0..)
-        .map(|n| PathBuf::from(if n == 0 { base.clone() } else { format!("{base}-{n}") }))
+        .map(|n| {
+            PathBuf::from(if n == 0 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            })
+        })
         .find(|p| !p.exists())
         .expect("an unused backup name")
 }
 
 fn write_atomic(target: &Path, bytes: &[u8]) -> io::Result<()> {
-    let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("settings.json");
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("settings.json");
     let tmp = target.with_file_name(format!(".{name}.ccbox-{}.tmp", std::process::id()));
     let result = (|| {
         let mut f = fs::File::create(&tmp)?;
@@ -350,7 +397,10 @@ mod tests {
     #[test]
     fn shlex_quote_matches_python() {
         assert_eq!(shlex_quote(""), "''");
-        assert_eq!(shlex_quote("/Users/me/.cargo/bin/ccbox"), "/Users/me/.cargo/bin/ccbox");
+        assert_eq!(
+            shlex_quote("/Users/me/.cargo/bin/ccbox"),
+            "/Users/me/.cargo/bin/ccbox"
+        );
         assert_eq!(shlex_quote("/a b/ccbox"), "'/a b/ccbox'");
         assert_eq!(shlex_quote("it's"), "'it'\"'\"'s'");
         assert_eq!(shlex_quote("é"), "'é'");
@@ -390,7 +440,10 @@ mod tests {
     #[test]
     fn wire_adds_status_line_and_every_hook_to_an_empty_object() {
         let (v, lines) = wired(json!({}), "/x/ccbox");
-        assert_eq!(v["statusLine"], json!({"type": "command", "command": "/x/ccbox", "refreshInterval": 5}));
+        assert_eq!(
+            v["statusLine"],
+            json!({"type": "command", "command": "/x/ccbox", "refreshInterval": 5})
+        );
         for (event, matchers) in HOOK_EVENTS {
             let groups = v["hooks"][event].as_array().unwrap();
             assert_eq!(groups.len(), matchers.len(), "{event}");
@@ -450,7 +503,8 @@ mod tests {
 
     #[test]
     fn python_json_escapes_non_ascii_and_formats_like_json_dumps() {
-        let v: Value = serde_json::from_str(r#"{"a": "é😀\u007f", "b": [], "c": {}, "d": [1, 2.5]}"#).unwrap();
+        let v: Value =
+            serde_json::from_str(r#"{"a": "é😀\u007f", "b": [], "c": {}, "d": [1, 2.5]}"#).unwrap();
         assert_eq!(
             to_python_json(&v),
             "{\n  \"a\": \"\\u00e9\\ud83d\\ude00\\u007f\",\n  \"b\": [],\n  \"c\": {},\n  \"d\": [\n    1,\n    2.5\n  ]\n}\n"
@@ -491,7 +545,11 @@ mod tests {
         assert!(!r.changed(), "{r:?}");
         assert_eq!(fs::read(&settings).unwrap(), first);
         let backups = fs::read_dir(d.path()).unwrap().filter(|e| {
-            e.as_ref().unwrap().file_name().to_string_lossy().contains(".bak.")
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".bak.")
         });
         assert_eq!(backups.count(), 1);
     }
@@ -502,7 +560,8 @@ mod tests {
         let dir = d.path().join("new");
         let r = run(&dir, Path::new("/x/ccbox")).unwrap();
         assert!(r.backup.is_none());
-        let v: Value = serde_json::from_str(&fs::read_to_string(dir.join("settings.json")).unwrap()).unwrap();
+        let v: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("settings.json")).unwrap()).unwrap();
         assert_eq!(v["statusLine"]["command"], "/x/ccbox");
     }
 
