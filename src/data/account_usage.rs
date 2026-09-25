@@ -89,7 +89,7 @@ fn mtime_secs(path: &Path) -> Option<f64> {
 /// A clock that jumped backwards leaves timestamps in the future; treat those
 /// as due rather than waiting for the clock to catch up.
 fn refresh_due(cache_age: f64, attempt: &Attempt, now: f64) -> bool {
-    let cache_due = cache_age >= REFRESH_SECS || cache_age < 0.0;
+    let cache_due = !(0.0..REFRESH_SECS).contains(&cache_age);
     let backoff_over = now - attempt.at >= backoff_secs(attempt.failures) || attempt.at > now;
     cache_due && backoff_over
 }
