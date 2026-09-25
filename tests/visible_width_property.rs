@@ -16,7 +16,7 @@ use ccbox::{
     ansi::strip_ansi,
     config::{Density, Env, TasksView},
     consts::{MIN_WIDTH, NARROW_WIDTH},
-    input::session::{Model, SessionInfo},
+    input::session::{Model, RateBucket, RateLimits, SessionInfo},
     render,
     width::visible_width,
 };
@@ -106,9 +106,22 @@ proptest! {
         tasks_view in arb_tasks_view(),
         model in arb_model(),
         cwd in arb_cwd(),
+        limits in proptest::option::of((0.0f64..=120.0, 0.0f64..=120.0, 60i64..600_000)),
     ) {
-        let session = make_session(&model, &cwd, "");
-        let env = env_for(density, tasks_view);
+        let mut session = make_session(&model, &cwd, "");
+        let claude = tempfile::TempDir::new().unwrap();
+        let mut env = env_for(density, tasks_view);
+        if let Some((five, seven, resets_in)) = limits {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            session.rate_limits = RateLimits {
+                five_hour: RateBucket { used_percentage: five, resets_at: now + resets_in % 18_000 },
+                seven_day: RateBucket { used_percentage: seven, resets_at: now + resets_in },
+            };
+            env.claude_dir = claude.path().to_path_buf();
+        }
         let out = render(&session, &env, width);
         prop_assert!(!out.is_empty(), "render returned empty at width {}", width);
         for (idx, line) in out.lines().enumerate() {
@@ -120,6 +133,10 @@ proptest! {
                 "line {} has visible width {}, expected {}; line was {:?}",
                 idx, vw, want, plain
             );
+        }
+        if limits.is_some() {
+            let plain = strip_ansi(&out).into_owned();
+            prop_assert!(plain.contains("session") && plain.contains("week"), "{}", plain);
         }
     }
 }

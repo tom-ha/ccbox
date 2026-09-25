@@ -101,6 +101,9 @@ pub enum ExtraSpend {
 #[derive(Debug, Clone)]
 pub struct UsageLimit {
     pub label: String,
+    /// A per-model weekly limit such as `Fable`: ranked after the session and
+    /// week, and shown whole.
+    pub per_model: bool,
     pub used_pct: f64,
     pub resets_in_secs: Option<i64>,
     pub now: f64,
@@ -232,14 +235,14 @@ struct Plan {
 }
 
 impl Plan {
-    /// Model limits (third on) arrive whole.
-    fn minimal(n_limits: usize) -> Self {
+    fn minimal(limits: &[UsageLimit]) -> Self {
         Plan {
             shown: 1,
-            detail: (0..n_limits)
-                .map(|i| Detail {
-                    forecast: i >= 2,
-                    reset: i >= 2,
+            detail: limits
+                .iter()
+                .map(|l| Detail {
+                    forecast: l.per_model,
+                    reset: l.per_model,
                 })
                 .collect(),
             cost: false,
@@ -247,29 +250,35 @@ impl Plan {
         }
     }
 
-    fn with(&self, add: Add) -> Option<Plan> {
+    fn with(&self, add: Add) -> Plan {
         let mut p = self.clone();
         match add {
-            Add::Limit(i) if i == p.shown => p.shown += 1,
-            Add::Limit(_) => return None,
+            Add::Limit(i) => p.shown = i + 1,
             Add::Reset(i) => p.detail[i].reset = true,
             Add::Forecast(i) => p.detail[i].forecast = true,
             Add::Cost => p.cost = true,
             Add::Extra => p.extra = true,
         }
-        Some(p)
+        p
     }
 }
 
-/// Highest first: the week, the session's details, the week's, then the
-/// rest. The session is always shown, and bars fill whatever room is left.
-fn priorities(n_limits: usize) -> Vec<Add> {
-    let mut out: Vec<Add> = (1..n_limits.min(2)).map(Add::Limit).collect();
-    for i in 0..n_limits.min(2) {
+/// Highest first. The row takes these in order and stops at the first that
+/// doesn't fit, so whatever shows has everything ranked above it showing too.
+/// The first limit (the session) always shows; bars fill what's left.
+fn priorities(limits: &[UsageLimit]) -> Vec<Add> {
+    let windows = limits
+        .iter()
+        .take_while(|l| !l.per_model)
+        .count()
+        .clamp(1, 2);
+    let mut out: Vec<Add> = (1..windows).map(Add::Limit).collect();
+    out.extend([Add::Reset(0), Add::Forecast(0), Add::Extra]);
+    for i in 1..windows {
         out.extend([Add::Reset(i), Add::Forecast(i)]);
     }
-    out.extend([Add::Extra, Add::Cost]);
-    out.extend((2..n_limits).map(Add::Limit));
+    out.push(Add::Cost);
+    out.extend((windows..limits.len()).map(Add::Limit));
     out
 }
 
@@ -439,14 +448,16 @@ impl Renderer {
         };
         let width_of = |plan: &Plan| visible_width(&layout(plan, &[]));
 
-        let mut plan = Plan::minimal(limits.len());
+        let mut plan = Plan::minimal(limits);
         if width_of(&plan) > content_w {
             return " ".repeat(content_w);
         }
-        for add in priorities(limits.len()) {
-            if let Some(next) = plan.with(add).filter(|p| width_of(p) <= content_w) {
-                plan = next;
+        for add in priorities(limits) {
+            let next = plan.with(add);
+            if width_of(&next) > content_w {
+                break;
             }
+            plan = next;
         }
         let bars = bar_widths(content_w - width_of(&plan), plan.shown);
         fill(layout(&plan, &bars))
@@ -461,6 +472,7 @@ mod tests {
     fn session(pct: f64) -> UsageLimit {
         UsageLimit {
             label: "session".into(),
+            per_model: false,
             used_pct: pct,
             resets_in_secs: Some(2 * 3600 + 13 * 60),
             now: 0.0,
@@ -473,12 +485,21 @@ mod tests {
     fn week(pct: f64) -> UsageLimit {
         UsageLimit {
             label: "week".into(),
+            per_model: false,
             used_pct: pct,
             resets_in_secs: Some(3 * 86_400 + 4 * 3600),
             now: 0.0,
             pace_delta: None,
             trend: None,
             elapsed_frac: None,
+        }
+    }
+
+    fn fable(pct: f64) -> UsageLimit {
+        UsageLimit {
+            label: "Fable".into(),
+            per_model: true,
+            ..week(pct)
         }
     }
 
@@ -584,10 +605,7 @@ mod tests {
                 ..session(60.0)
             },
             week(89.0),
-            UsageLimit {
-                label: "Fable".into(),
-                ..week(82.0)
-            },
+            fable(82.0),
         ];
         let spend = Some(ExtraSpend::Actual {
             used: 130.96,
@@ -612,25 +630,107 @@ mod tests {
     }
 
     #[test]
-    fn smaller_items_take_the_room_a_wide_one_cannot() {
+    fn shown_items_follow_priority_order_at_every_width() {
+        let r = Renderer::default();
+        let day = 24.0 * H;
+        let lims = [
+            UsageLimit {
+                resets_in_secs: Some((3.0 * H) as i64),
+                trend: Some(steady_trend()),
+                ..session(60.0)
+            },
+            UsageLimit {
+                trend: Some(Trend {
+                    start: 0.0,
+                    end: 7.0 * day,
+                    now: 3.0 * day,
+                    samples: vec![(2.0 * day, 50.0), (2.5 * day, 70.0), (3.0 * day, 89.0)],
+                    lookback: day,
+                }),
+                ..week(89.0)
+            },
+            UsageLimit {
+                resets_in_secs: Some(5 * 86_400),
+                ..fable(82.0)
+            },
+        ];
+        let spend = Some(ExtraSpend::Actual {
+            used: 130.96,
+            limit: 500.0,
+        });
+        let mut prev_count = 0;
+        for box_width in 40..=260 {
+            let line = r.tokens_cost(1, 2, Some((0.18, 1.42)), &lims, spend, box_width);
+            let plain = strip_ansi(&line).into_owned();
+            let cluster = |start: &str| {
+                plain
+                    .split(GAP)
+                    .map(str::trim)
+                    .find(|c| c.starts_with(start))
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let (sess, wk) = (cluster("session"), cluster("week"));
+            let shown = [
+                !wk.is_empty(),
+                sess.contains("resets"),
+                sess.contains("maxed"),
+                plain.contains("extra usage"),
+                wk.contains("resets"),
+                wk.contains("maxed"),
+                plain.contains("today"),
+                plain.contains("Fable"),
+            ];
+            let count = shown.iter().take_while(|&&s| s).count();
+            assert!(
+                shown[count..].iter().all(|&s| !s),
+                "{box_width}: {shown:?} {plain}"
+            );
+            assert!(count >= prev_count, "{box_width} lost items: {plain}");
+            prev_count = count;
+        }
+        assert_eq!(prev_count, 8, "everything shows in a wide box");
+    }
+
+    #[test]
+    fn extra_spend_outranks_week_reset_and_model_limits() {
         let r = Renderer::default();
         let spend = Some(ExtraSpend::Actual {
             used: 130.96,
             limit: 500.0,
         });
-        let line = r.tokens_cost(1, 2, None, &[session(100.0), week(89.0)], spend, 62);
+        let lims = [session(100.0), week(89.0), fable(82.0)];
+        let line = r.tokens_cost(1, 2, None, &lims, spend, 80);
         let plain = strip_ansi(&line).into_owned();
-        assert_eq!(plain.matches(" resets ").count(), 2, "{plain}");
-        assert!(!plain.contains("extra usage"), "{plain}");
+        assert!(plain.contains("extra usage $130.96 of $500.00"), "{plain}");
+        assert!(!plain.contains("Fable"), "{plain}");
+    }
 
-        let fable = UsageLimit {
-            label: "Fable".into(),
-            ..week(82.0)
+    #[test]
+    fn model_limit_does_not_take_a_missing_weeks_rank() {
+        let r = Renderer::default();
+        let sonnet = UsageLimit {
+            label: "Sonnet 4.5".into(),
+            resets_in_secs: Some(5 * 86_400),
+            ..fable(40.0)
         };
-        let line = r.tokens_cost(1, 2, None, &[session(100.0), week(89.0), fable], spend, 80);
+        let line = r.tokens_cost(1, 2, None, &[session(61.0), sonnet], None, 46);
         let plain = strip_ansi(&line).into_owned();
-        assert!(plain.contains("Fable  82%"), "{plain}");
-        assert!(!plain.contains("extra usage"), "{plain}");
+        assert!(plain.contains("resets"), "{plain}");
+        assert!(!plain.contains("Sonnet"), "{plain}");
+    }
+
+    #[test]
+    fn dropped_forecast_leaves_no_separator() {
+        let r = Renderer::default();
+        let l = UsageLimit {
+            resets_in_secs: Some((3.0 * H) as i64),
+            trend: Some(steady_trend()),
+            ..session(60.0)
+        };
+        let plain = strip_ansi(&r.limit_cluster(&l, 0, false, true)).into_owned();
+        assert!(plain.contains("60% resets"), "{plain}");
+        assert!(!plain.contains('·'), "{plain}");
     }
 
     #[test]
@@ -827,10 +927,7 @@ mod tests {
     #[test]
     fn limits_resetting_together_share_one_label() {
         let r = Renderer::default();
-        let fable = UsageLimit {
-            label: "Fable".into(),
-            ..week(82.0)
-        };
+        let fable = fable(82.0);
         let line = r.tokens_cost(1, 2, None, &[session(13.0), week(84.0), fable], None, 140);
         let plain = strip_ansi(&line).into_owned();
         assert_eq!(plain.matches(" resets ").count(), 2, "{plain}");

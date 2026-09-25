@@ -289,6 +289,11 @@ fn narrow_box_shows_limits_but_not_api_tokens() {
     assert!(plain.contains("session  61%"), "{plain}");
     assert!(plain.contains("week  89%"), "{plain}");
 
+    let mut week_only = fixture();
+    week_only.rate_limits.five_hour = Default::default();
+    let plain = strip_ansi(&render(&week_only, &sc.env, 44)).into_owned();
+    assert!(plain.contains("week  89%"), "{plain}");
+
     let mut api = fixture();
     api.rate_limits = Default::default();
     let plain = strip_ansi(&render(&api, &sc.env, 44)).into_owned();

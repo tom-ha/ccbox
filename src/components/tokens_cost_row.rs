@@ -27,6 +27,7 @@ fn usage_limit(
     let remaining = b.resets_at - now as i64;
     Some(UsageLimit {
         label: label.to_string(),
+        per_model: false,
         used_pct: b.used_percentage,
         resets_in_secs: (remaining > 0).then_some(remaining),
         now,
@@ -139,7 +140,10 @@ pub fn usage_limits(ctx: &ComponentContext) -> Vec<UsageLimit> {
             SEVEN_DAY_WARMUP_MINUTES,
             ctx.now,
         )
-        .map(|l| with_history(ctx, l, &series, &bucket, 300.0, fetched_at))
+        .map(|l| UsageLimit {
+            per_model: true,
+            ..with_history(ctx, l, &series, &bucket, 300.0, fetched_at)
+        })
     }))
     .collect()
 }
