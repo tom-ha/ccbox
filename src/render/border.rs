@@ -13,6 +13,15 @@ use crate::render::pill::{Edge, Pill};
 use crate::theme::Theme;
 use crate::width::{pad, visible_width};
 
+/// The first candidate that fits without covering an `ups` junction.
+pub fn pick_bottom_chip<'c>(width: i32, ups: &[i32], chips: &'c [String]) -> Option<&'c str> {
+    let inner = (width - 2).max(0);
+    chips.iter().map(String::as_str).find(|c| {
+        let w = visible_width(c) as i32;
+        w > 0 && w <= inner && !ups.iter().any(|u| (width - w..width).contains(u))
+    })
+}
+
 pub struct BorderRenderer<'a> {
     pub gradient: GradientEngine<'a>,
     pub theme: &'a Theme,
@@ -111,12 +120,14 @@ impl<'a> BorderRenderer<'a> {
         parts
     }
 
-    pub fn border_bottom(&self, width: i32, ups: &[i32], fill: f64) -> String {
+    pub fn border_bottom(&self, width: i32, ups: &[i32], fill: f64, chips: &[String]) -> String {
         let ups_set: HashSet<i32> = ups.iter().copied().collect();
+        let chip = pick_bottom_chip(width, ups, chips).unwrap_or("");
+        let chip_w = visible_width(chip) as i32;
         let mut parts = String::new();
         parts.push_str(&self.gradient.grad_at(0, width, 1.0, fill));
         parts.push('╰');
-        for i in 0..(width - 2) {
+        for i in 0..(width - 2 - chip_w) {
             let ch = if ups_set.contains(&(i + 2)) {
                 '┴'
             } else {
@@ -124,6 +135,10 @@ impl<'a> BorderRenderer<'a> {
             };
             parts.push_str(&self.gradient.grad_at(i + 1, width, 1.0, fill));
             parts.push(ch);
+        }
+        if !chip.is_empty() {
+            parts.push_str(chip);
+            parts.push_str(RESET);
         }
         parts.push_str(&self.gradient.grad_at(width - 1, width, 1.0, fill));
         parts.push('╯');
@@ -324,7 +339,7 @@ mod tests {
     #[test]
     fn bottom_border_visible_width_eq_width() {
         for w in [40, 65, 80, 100, 130] {
-            let s = br().border_bottom(w, &[], 1.0);
+            let s = br().border_bottom(w, &[], 1.0, &[]);
             assert_eq!(visible_width(&s), w as usize);
         }
     }
@@ -372,7 +387,7 @@ mod tests {
     #[test]
     fn bottom_border_seam_at_ups_columns() {
         // ups column should render ┴ at that visible-column index.
-        let s = br().border_bottom(20, &[5, 12], 1.0);
+        let s = br().border_bottom(20, &[5, 12], 1.0, &[]);
         // Strip ANSI and count to col 5.
         let stripped = crate::ansi::strip_ansi(&s);
         let chars: Vec<char> = stripped.chars().collect();
@@ -427,6 +442,45 @@ mod tests {
             !plain.contains("this is"),
             "overlong chip must not render: {plain:?}"
         );
+    }
+
+    fn chips() -> Vec<String> {
+        vec![" long chip text ".to_string(), " mid ".to_string(), " s ".to_string()]
+    }
+
+    #[test]
+    fn bottom_chip_right_anchors_the_longest_that_fits() {
+        let s = br().border_bottom(40, &[], 1.0, &chips());
+        assert_eq!(visible_width(&s), 40);
+        assert!(crate::ansi::strip_ansi(&s).ends_with("─ long chip text ╯"), "{s:?}");
+        let s = br().border_bottom(12, &[], 1.0, &chips());
+        assert_eq!(crate::ansi::strip_ansi(&s), "╰───── mid ╯");
+        let s = br().border_bottom(6, &[], 1.0, &chips());
+        assert_eq!(crate::ansi::strip_ansi(&s), "╰─ s ╯");
+        let s = br().border_bottom(4, &[], 1.0, &chips());
+        assert_eq!(crate::ansi::strip_ansi(&s), "╰──╯");
+    }
+
+    #[test]
+    fn bottom_chip_never_covers_a_junction() {
+        let s = br().border_bottom(40, &[30], 1.0, &chips());
+        let plain = crate::ansi::strip_ansi(&s);
+        assert!(plain.ends_with(" mid ╯"), "{plain:?}");
+        assert_eq!(plain.chars().nth(29), Some('┴'), "{plain:?}");
+        let s = br().border_bottom(40, &[39], 1.0, &chips());
+        let plain = crate::ansi::strip_ansi(&s);
+        assert_eq!(plain.chars().nth(38), Some('┴'), "{plain:?}");
+        assert!(!plain.contains(" s "), "{plain:?}");
+    }
+
+    #[test]
+    fn bottom_border_keeps_its_width_with_any_chip() {
+        for w in 3..=160 {
+            for ups in [vec![], vec![w / 2], vec![w - 3, w - 8]] {
+                let s = br().border_bottom(w, &ups, 1.0, &chips());
+                assert_eq!(visible_width(&s), w as usize, "width={w} ups={ups:?}");
+            }
+        }
     }
 
     #[test]

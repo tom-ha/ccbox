@@ -46,6 +46,15 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some("hook") => return run_hook(),
+        Some("update-check") => {
+            ccbox::data::update_check::run_check(
+                &resolve_claude_dir(),
+                now_secs(),
+                update_check_enabled(),
+                &ccbox::release::releases_url(),
+            );
+            return ExitCode::SUCCESS;
+        }
         Some("setup") => return run_setup(),
         Some("update") => return run_update(rest),
         Some("toggle") => return run_toggle(rest),
@@ -147,6 +156,7 @@ fn main() -> ExitCode {
         density,
         tasks_view,
         git_cache_ttl_ms,
+        update_check: update_check_enabled(),
     };
 
     let theme_env = env::var("CLAUDE_STATUSLINE_THEME").ok();
@@ -220,6 +230,10 @@ fn run_update(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn update_check_enabled() -> bool {
+    parse_bool_tristate(env::var("CCBOX_UPDATE_CHECK").ok().as_deref()) != Some(false)
 }
 
 fn now_secs() -> f64 {
@@ -378,8 +392,26 @@ fn run_status(args: &[String]) -> ExitCode {
     let env_tasks = parse_bool_tristate(env::var("CCBOX_SHOW_TASKS").ok().as_deref());
     let env_subs = parse_bool_tristate(env::var("CCBOX_SHOW_SUBAGENTS").ok().as_deref());
     print_status(&toggles::load(&claude_dir), env_tasks, env_subs, resolve_density());
+    let cache = ccbox::data::update_check::read_cache(&claude_dir);
+    let latest = if cache.checked_at <= 0.0 {
+        "unknown (not checked yet)".to_string()
+    } else {
+        let t = chrono::DateTime::from_timestamp(cache.checked_at as i64, 0)
+            .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        match (&cache.latest, cache.newer_than_installed()) {
+            (Some(v), Some(_)) => format!("{v} (checked {t}; run ccbox update)"),
+            (Some(v), None) => format!("{v} (checked {t})"),
+            (None, _) => format!("none published (checked {t})"),
+        }
+    };
     println!();
     println!("installed     {VERSION}");
+    println!("latest        {latest}");
+    println!(
+        "update check  {}",
+        if update_check_enabled() { "on" } else { "off (CCBOX_UPDATE_CHECK)" }
+    );
     ExitCode::SUCCESS
 }
 

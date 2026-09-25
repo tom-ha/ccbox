@@ -21,6 +21,7 @@ use crate::data::account_usage::{self, AccountUsage};
 use crate::data::waiting::{self, Marker};
 use crate::data::{session_name, subscription_marker};
 use crate::data::task_list::TaskList;
+use crate::data::update_check::{self, Cache as UpdateCheck};
 use crate::data::token_log::TokenLog;
 use crate::data::transcript_usage::TranscriptUsage;
 use crate::data::user_messages::last_user_prompt_ts;
@@ -43,6 +44,7 @@ pub struct RenderCache {
     session_name: OnceCell<Option<String>>,
     waiting: OnceCell<Vec<(String, Marker)>>,
     account_usage: OnceCell<Option<AccountUsage>>,
+    update_check: OnceCell<Option<UpdateCheck>>,
     session_cost: Cell<Option<f64>>,
     day_cost: Cell<Option<f64>>,
     show_cost: Cell<Option<bool>>,
@@ -144,6 +146,12 @@ impl RenderCache {
                 }
                 account_usage::load(&ctx.env.claude_dir, ctx.now)
             })
+            .as_ref()
+    }
+
+    pub fn update_check(&self, ctx: &ComponentContext) -> Option<&UpdateCheck> {
+        self.update_check
+            .get_or_init(|| update_check::load(&ctx.env.claude_dir, ctx.now, ctx.env.update_check))
             .as_ref()
     }
 
