@@ -106,7 +106,9 @@ if [[ -d "$CACHE_DIR" ]]; then
 fi
 
 # Step 3: remove the binary: cargo's record for a source build, the file for a prebuilt one.
-if command -v cargo >/dev/null 2>&1; then
+if [[ -n "${CCBOX_BIN_DIR:-}" ]]; then
+  echo "==> CCBOX_BIN_DIR is set — leaving cargo's install root alone"
+elif command -v cargo >/dev/null 2>&1; then
   if cargo uninstall ccbox 2>/dev/null; then
     echo "==> uninstalled ccbox via cargo"
   else

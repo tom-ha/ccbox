@@ -253,3 +253,21 @@ fn downgrade_needs_force_and_a_missing_version_is_not_found() {
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(fs::read(&inst.exe).unwrap(), fake_binary(old));
 }
+
+#[test]
+fn an_empty_claude_config_dir_means_home_dot_claude() {
+    let inst = Install::new();
+    let home = inst.exe.parent().unwrap().parent().unwrap().join("home");
+    let cwd = inst.exe.parent().unwrap().parent().unwrap().join("cwd");
+    fs::create_dir_all(&cwd).unwrap();
+    let out = Command::new(&inst.exe)
+        .arg("setup")
+        .env("CLAUDE_CONFIG_DIR", "")
+        .env("HOME", &home)
+        .current_dir(&cwd)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(home.join(".claude/settings.json").exists());
+    assert_eq!(fs::read_dir(&cwd).unwrap().count(), 0);
+}

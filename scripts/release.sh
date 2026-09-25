@@ -16,7 +16,7 @@ fi
 branch="$(git symbolic-ref --short -q HEAD)" || err "HEAD is detached; check out the branch to release from"
 
 files=(CHANGELOG.md Cargo.toml Cargo.lock .claude-plugin/marketplace.json plugins/ccbox/.claude-plugin/plugin.json)
-trap 'git checkout -q -- "${files[@]}"; err "release aborted; version files restored"' ERR
+trap 'git checkout -q HEAD -- "${files[@]}"; err "release aborted; version files restored"' ERR
 
 python3 - "$version" <<'PY'
 import datetime, json, re, sys

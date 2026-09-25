@@ -87,11 +87,17 @@ install_prebuilt() {
   echo "==> checksum verified ($actual)"
   tar -xzf "$tmp/$TAR_NAME" -C "$tmp" ccbox || { err "$TAR_NAME has no ccbox binary"; return 1; }
   [[ -f "$tmp/ccbox" ]] || { err "$TAR_NAME has no ccbox binary"; return 1; }
-  mkdir -p "$BIN_DIR"
-  cp "$tmp/ccbox" "$BIN_DIR/.ccbox-install.$$"
-  chmod 0755 "$BIN_DIR/.ccbox-install.$$"
-  mv -f "$BIN_DIR/.ccbox-install.$$" "$BIN_DIR/ccbox"
+  local staged="$BIN_DIR/.ccbox-install.$$"
+  if ! { mkdir -p "$BIN_DIR" && cp "$tmp/ccbox" "$staged" && chmod 0755 "$staged" && mv -f "$staged" "$BIN_DIR/ccbox"; }; then
+    rm -f "$staged"
+    err "could not write $BIN_DIR/ccbox; set CCBOX_BIN_DIR to a directory you can write to"
+    return 1
+  fi
   CCBOX_BIN="$BIN_DIR/ccbox"
+  if [[ "$("$CCBOX_BIN" version 2>/dev/null)" != "ccbox ${RELEASE_TAG#v}" ]]; then
+    err "$CCBOX_BIN does not report ccbox ${RELEASE_TAG#v} after installing"
+    return 1
+  fi
 }
 
 install_from_source() {

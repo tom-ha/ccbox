@@ -263,6 +263,7 @@ impl Report {
 
 pub fn claude_dir() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             std::env::var_os("HOME")

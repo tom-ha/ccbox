@@ -114,9 +114,7 @@ fn main() -> ExitCode {
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"));
-    let claude_dir = env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".claude"));
+    let claude_dir = resolve_claude_dir();
 
     let max_width: u16 = env::var("CCBOX_MAX_WIDTH")
         .ok()
@@ -271,12 +269,7 @@ fn run_hook() -> ExitCode {
 /// `toggle` subcommand reads/writes the same `ccbox-toggles.json` the
 /// statusline renders against.
 fn resolve_claude_dir() -> PathBuf {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"));
-    env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".claude"))
+    ccbox::setup::claude_dir()
 }
 
 /// Resolve the current density preset for the `toggle` subcommand. Same

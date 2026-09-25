@@ -14,8 +14,11 @@ fn fixture() -> String {
 }
 
 fn run_snapshot(width: &str, extra_env: &[(&str, &str)]) -> String {
+    let claude_dir = tempfile::tempdir().unwrap();
     let mut cmd = Command::new(bin());
     cmd.arg("--snapshot").arg("--width").arg(width);
+    cmd.env("CLAUDE_CONFIG_DIR", claude_dir.path())
+        .env("CCBOX_UPDATE_CHECK", "0");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
