@@ -236,7 +236,7 @@ fn moved_on(m: &Marker) -> bool {
         .and_then(|md| md.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .is_some_and(|t| t.as_secs_f64() > cutoff);
+        .is_some_and(|t| t.as_secs_f64() > m.since);
     if !fresh {
         return false;
     }
@@ -254,8 +254,9 @@ fn moved_on(m: &Marker) -> bool {
         if !is_turn {
             return false;
         }
-        // Abandoning a prompt (Esc, or a rejection) fires no hook and may come
-        // within the grace window, so those records count from `since` itself.
+        // Esc (any agent) or a main-thread rejection fires no hook and can land
+        // inside the grace window, so those records count from `since` itself.
+        // A rejected subagent isn't aborted: it keeps writing records.
         let abandoned = ln.contains("[Request interrupted by user")
             || ln.contains("The user doesn't want to proceed with this tool use");
         let after = if abandoned { m.since } else { cutoff };
@@ -899,29 +900,52 @@ mod tests {
         format!("{{\"type\":\"{kind}\",\"timestamp\":\"{ts}\",\"text\":\"{text}\"}}\n")
     }
 
+    /// Sets a file's mtime, so a test sees what Claude Code leaves behind
+    /// (the interrupt record is the file's last write).
+    fn set_mtime(path: &Path, secs: f64) {
+        #[repr(C)]
+        struct Timeval {
+            tv_sec: i64,
+            tv_usec: i64,
+        }
+        extern "C" {
+            fn utimes(path: *const std::os::raw::c_char, times: *const Timeval) -> i32;
+        }
+        let t = Timeval {
+            tv_sec: secs as i64,
+            tv_usec: 0,
+        };
+        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let times = [
+            Timeval {
+                tv_sec: t.tv_sec,
+                tv_usec: 0,
+            },
+            t,
+        ];
+        assert_eq!(unsafe { utimes(c.as_ptr(), times.as_ptr()) }, 0);
+    }
+
     #[test]
     fn quick_escape_on_a_subagent_prompt_still_clears() {
         let d = tempdir().unwrap();
         let main = d.path().join("s1.jsonl");
         let sub_dir = d.path().join("s1").join("subagents");
         fs::create_dir_all(&sub_dir).unwrap();
+        let sub = sub_dir.join("agent-a1.jsonl");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
         let since = now - 60.0;
         fs::write(&main, "").unwrap();
-        fs::write(sub_dir.join("agent-a1.jsonl"), "").unwrap();
+        fs::write(&sub, "").unwrap();
         let mut h = tool("PermissionRequest", "Bash", "s1", "a1", "rm x");
         h.transcript_path = main.to_string_lossy().into();
         apply_hook(d.path(), &h, since, || None);
 
-        fs::write(
-            sub_dir.join("agent-a1.jsonl"),
-            record("assistant", "next block", since + 2.0),
-        )
-        .unwrap();
-        assert_eq!(marker_files(d.path()), 1);
+        fs::write(&sub, record("assistant", "next block", since + 2.0)).unwrap();
+        set_mtime(&sub, since + 2.0);
         assert_eq!(
             load_all(d.path(), now).len(),
             1,
@@ -929,7 +953,7 @@ mod tests {
         );
 
         fs::write(
-            sub_dir.join("agent-a1.jsonl"),
+            &sub,
             record(
                 "user",
                 "[Request interrupted by user for tool use]",
@@ -937,7 +961,11 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(load_all(d.path(), now).is_empty(), "Esc at +2 s clears");
+        set_mtime(&sub, since + 2.0);
+        assert!(
+            load_all(d.path(), now).is_empty(),
+            "Esc at +2 s, as the file's last write"
+        );
     }
 
     #[test]

@@ -334,11 +334,13 @@ mod tests {
 
     #[test]
     fn context_line_ignores_cumulative_session_totals() {
-        let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 5_000_000;
-        ctx.total_output_tokens = 400_000;
+        let mut ctx = ContextWindow {
+            total_input_tokens: 5_000_000,
+            total_output_tokens: 400_000,
+            context_window_size: 200_000,
+            ..Default::default()
+        };
         ctx.current_usage.cache_read_input_tokens = 50_000;
-        ctx.context_window_size = 200_000;
         let plain = plain_line(&ctx);
         assert!(plain.contains("50.0K of 200.0K (25%)"), "{plain}");
     }
