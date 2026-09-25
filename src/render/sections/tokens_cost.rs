@@ -1,6 +1,6 @@
-//! `tokens_cost` — single-line tokens / cost / rate block.
+use chrono::{Local, TimeZone, Timelike};
 
-use crate::glyphs::{ICON_COST, ICON_TOK_RATE, RESET};
+use crate::glyphs::{bar, BOLD, ICON_COST, RESET};
 use crate::render::format::fmt_tok;
 use crate::render::Renderer;
 use crate::width::visible_width;
@@ -8,32 +8,108 @@ use crate::width::visible_width;
 pub const IN_W: usize = 6;
 pub const OUT_W: usize = 6;
 
-/// Spark history + recent-active flags piped in from the data layer. Keeps
-/// `tokens_cost` pure — it doesn't read or write the rate log.
+const GAP: &str = "   ";
+const MIN_BAR: usize = 5;
+const MAX_BAR: usize = 20;
+const MIN_SPAN_SECS: f64 = 5.0 * 60.0;
+
+/// A window always opens at 0%, so the curve starts at `(start, 0)`.
 #[derive(Debug, Clone, Default)]
-pub struct TokensCostExtras {
-    pub spark_history: Vec<i32>,
-    pub in_active: bool,
-    pub out_active: bool,
-    /// When `false`, render whitespace in place of the cost cluster so other
-    /// columns remain visually stable. Defaults to `true`.
-    pub show_cost: bool,
+pub struct Trend {
+    pub start: f64,
+    pub end: f64,
+    pub now: f64,
+    pub samples: Vec<(f64, f64)>,
+    /// How far back the burn rate looks: 30 min for the session, a day for
+    /// weekly limits so nights and breaks are part of the rate.
+    pub lookback: f64,
 }
 
-impl TokensCostExtras {
-    pub fn new() -> Self {
-        Self {
-            show_cost: true,
-            ..Default::default()
+impl Trend {
+    fn points(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        std::iter::once((self.start, 0.0)).chain(
+            self.samples
+                .iter()
+                .copied()
+                .filter(|&(ts, _)| ts >= self.start),
+        )
+    }
+
+    fn pct_at(&self, t: f64) -> f64 {
+        let mut prev = (self.start, 0.0);
+        for (ts, pct) in self.points() {
+            if ts >= t {
+                let span = ts - prev.0;
+                if span <= 0.0 {
+                    return pct;
+                }
+                return prev.1 + (pct - prev.1) * (t - prev.0) / span;
+            }
+            prev = (ts, pct);
         }
+        prev.1
+    }
+
+    /// Least-squares slope over the lookback, so one step in the quantised
+    /// usage % doesn't swing the forecast.
+    pub fn secs_to_full(&self) -> Option<f64> {
+        let t1 = self.now;
+        let t0 = (t1 - self.lookback).max(self.start);
+        if t1 - t0 < MIN_SPAN_SECS {
+            return None;
+        }
+        let p1 = self.pct_at(t1);
+        let pts: Vec<(f64, f64)> = std::iter::once((t0, self.pct_at(t0)))
+            .chain(
+                self.samples
+                    .iter()
+                    .copied()
+                    .filter(|&(ts, _)| ts > t0 && ts < t1),
+            )
+            .chain(std::iter::once((t1, p1)))
+            .collect();
+        let n = pts.len() as f64;
+        let (mt, mp) = pts
+            .iter()
+            .fold((0.0, 0.0), |(a, b), &(t, p)| (a + t / n, b + p / n));
+        let (num, den) = pts.iter().fold((0.0, 0.0), |(num, den), &(t, p)| {
+            (num + (t - mt) * (p - mp), den + (t - mt) * (t - mt))
+        });
+        let slope = num / den;
+        (slope > 0.0).then(|| ((100.0 - p1) / slope).max(0.0))
     }
 }
 
-/// Single-line result. `mark_col` is the 1-indexed column where the 60s tick
-/// inside the sparkline lives (or `0` if the sparkline didn't fit).
-pub struct TokensCost {
-    pub line: String,
-    pub mark_col: i32,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExtraSpend {
+    Estimated(f64),
+    Actual { used: f64, limit: f64 },
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageLimit {
+    pub label: String,
+    pub used_pct: f64,
+    pub resets_in_secs: Option<i64>,
+    pub now: f64,
+    /// Percentage points ahead of (positive) or behind a linear burn of the
+    /// window; see [`crate::cost::burndown::burndown_delta`].
+    pub pace_delta: Option<f64>,
+    /// Feeds the `100% in …` forecast.
+    pub trend: Option<Trend>,
+    /// How far through the window we are (0–1): where an even burn would
+    /// have usage right now. Drawn as the pace marker.
+    pub elapsed_frac: Option<f64>,
+}
+
+impl UsageLimit {
+    fn hits_full_in(&self) -> Option<i64> {
+        if self.used_pct >= 100.0 {
+            return None;
+        }
+        let secs = self.trend.as_ref()?.secs_to_full()? as i64;
+        (secs < self.resets_in_secs?).then_some(secs)
+    }
 }
 
 fn fmt_money(v: f64) -> String {
@@ -56,182 +132,236 @@ fn fmt_money(v: f64) -> String {
     format!("{sign}${int_str}.{:02}", cents)
 }
 
-fn rjust(s: &str, w: usize) -> String {
-    let cur = s.chars().count();
-    if cur >= w {
-        return s.to_string();
-    }
-    let mut out = " ".repeat(w - cur);
-    out.push_str(s);
-    out
-}
-
-fn in_cluster_width() -> i32 {
-    // "↓ in " (5) + rjust IN_W
-    5 + IN_W as i32
-}
-fn out_cluster_width() -> i32 {
-    // "↑ out " (6) + rjust OUT_W
-    6 + OUT_W as i32
-}
-fn cost_cluster_width(sess: f64, day: f64) -> i32 {
-    let c1 = fmt_money(sess);
-    let c2 = fmt_money(day);
-    // "<ICON_COST><c1> sess · <c2> today" — the cost glyph is 1 cell wide.
-    (1 + c1.chars().count()
-        + " sess · ".chars().count()
-        + c2.chars().count()
-        + " today".chars().count()) as i32
-}
-fn rate_cluster_width(tok_rate: u64) -> i32 {
-    // ICON_TOK_RATE (1 cell) + " " (1) + fmt_tok (≤6) + " t/m" (4)
-    1 + 1 + fmt_tok(tok_rate).chars().count() as i32 + 4
-}
-
-const GAP_BETWEEN: i32 = 3; // "   " between clusters
-const GAP_RATE_SPARK: i32 = 2; // "  " between rate label and sparkline
-
-/// Compute how many cells the sparkline takes. Used by the layout to size the
-/// rate-log history exactly to the rendered sparkline. Mirrors the math inside
-/// `tokens_cost`.
-pub fn sparkline_bar_w(
-    box_width: i32,
-    sess_cost: f64,
-    day_cost: f64,
-    tok_rate: u64,
-    show_cost: bool,
-) -> i32 {
-    // content_w = box_width - 3 (one cell for left border, one space pad, one
-    // cell for right border).
-    let content_w = box_width - 3;
-    let cost_w = if show_cost {
-        cost_cluster_width(sess_cost, day_cost)
+pub fn fmt_reset(secs: i64) -> String {
+    let s = secs.max(0);
+    let (d, h, m) = (s / 86_400, (s % 86_400) / 3600, (s % 3600) / 60);
+    if d > 0 {
+        format!("{d}d{h}h")
+    } else if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m")
     } else {
-        0
+        "<1m".to_string()
+    }
+}
+
+/// `9am` / `9:30am` within 24 hours (Claude Code's `/usage` threshold),
+/// else `Mon 12pm`. `round_min` snaps to the nearest multiple so forecasts
+/// don't pretend to be exact.
+pub fn fmt_clock_in<Tz: TimeZone>(tz: &Tz, now: f64, secs: i64, round_min: i64) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let step = round_min.max(1) * 60;
+    let at_ts = ((now as i64 + secs.max(0)) + step / 2) / step * step;
+    let Some(at) = tz.timestamp_opt(at_ts, 0).single() else {
+        return fmt_reset(secs);
     };
-    let cost_gap = if show_cost { GAP_BETWEEN } else { 0 };
-    let fixed = in_cluster_width()
-        + GAP_BETWEEN
-        + out_cluster_width()
-        + cost_gap
-        + cost_w
-        + GAP_BETWEEN
-        + rate_cluster_width(tok_rate)
-        + GAP_RATE_SPARK;
-    (content_w - fixed).max(0)
+    let time = if at.minute() == 0 {
+        at.format("%-I%P")
+    } else {
+        at.format("%-I:%M%P")
+    };
+    if (at_ts as f64 - now) <= 24.0 * 3600.0 {
+        time.to_string()
+    } else {
+        format!("{} {time}", at.format("%a"))
+    }
+}
+
+fn fmt_clock(now: f64, secs: i64, round_min: i64) -> String {
+    fmt_clock_in(&Local, now, secs, round_min)
+}
+
+/// Neighbouring limits that reset together share one `resets` label, shown
+/// on the last of them.
+fn same_reset_as_next(lims: &[UsageLimit], i: usize) -> bool {
+    match (
+        lims.get(i).and_then(|l| l.resets_in_secs),
+        lims.get(i + 1).and_then(|l| l.resets_in_secs),
+    ) {
+        (Some(a), Some(b)) => (a - b).abs() < 120,
+        _ => false,
+    }
+}
+
+fn rjust(s: &str, w: usize) -> String {
+    format!("{s:>w$}")
 }
 
 impl Renderer {
+    fn limit_colour(&self, l: &UsageLimit) -> &'static str {
+        if l.used_pct >= 90.0 {
+            self.theme.alert
+        } else if l.used_pct >= 70.0
+            || l.pace_delta.is_some_and(|d| d > 10.0)
+            || l.hits_full_in().is_some()
+        {
+            self.theme.warn
+        } else {
+            self.theme.safe
+        }
+    }
+
+    fn limit_cluster(&self, l: &UsageLimit, bar_w: usize, show_reset: bool) -> String {
+        let t = self.theme;
+        let clr = self.limit_colour(l);
+        let pct = rjust(&format!("{:.0}%", l.used_pct.clamp(0.0, 100.0)), 4);
+        let mut out = format!("{}{}{RESET} {clr}{pct}{RESET}", t.label, l.label);
+        if bar_w > 0 {
+            let filled = ((l.used_pct / 100.0) * bar_w as f64)
+                .round()
+                .clamp(0.0, bar_w as f64) as usize;
+            let marker = l
+                .elapsed_frac
+                .map(|f| ((f * bar_w as f64).round() as usize).min(bar_w - 1));
+            out.push(' ');
+            for i in 0..bar_w {
+                if Some(i) == marker {
+                    out.push_str(&format!("{BOLD}{}│{RESET}", t.time));
+                } else if i < filled && marker.is_some_and(|m| i > m) {
+                    out.push_str(&format!("{}▓{RESET}", t.alert));
+                } else if i < filled {
+                    out.push_str(&format!("{clr}{}{RESET}", bar::FILLED));
+                } else {
+                    out.push_str(&format!("{}{}{RESET}", t.bar_empty, bar::EMPTY));
+                }
+            }
+        }
+        if let Some(secs) = l.hits_full_in() {
+            out.push_str(&format!(
+                " {}maxed at ~{}{RESET}",
+                t.alert,
+                fmt_clock(l.now, secs, 15)
+            ));
+        }
+        if let Some(secs) = l.resets_in_secs.filter(|_| show_reset) {
+            let sep = if l.hits_full_in().is_some() {
+                " ·"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "{sep} {}resets {}{}{RESET}",
+                t.label,
+                t.time,
+                fmt_clock(l.now, secs, 1)
+            ));
+        }
+        out
+    }
+
+    /// In/out tokens show only when there are no limits (API billing). When
+    /// space is tight, later bars drop first, then later limits.
     pub fn tokens_cost(
         &self,
         sess_in: u64,
         sess_out: u64,
-        sess_cost: f64,
-        day_cost: f64,
-        tok_rate: u64,
-        extras: &TokensCostExtras,
+        cost: Option<(f64, f64)>,
+        limits: &[UsageLimit],
+        extra_usage: Option<ExtraSpend>,
         box_width: i32,
-    ) -> TokensCost {
+    ) -> String {
         let t = self.theme;
-        let in_icon = if extras.in_active {
-            "\x1b[1m↓\x1b[0m"
-        } else {
-            "↓"
-        };
-        let out_icon = if extras.out_active {
-            "\x1b[1m↑\x1b[0m"
-        } else {
-            "↑"
-        };
+        let content_w = (box_width - 3).max(0) as usize;
 
-        let sess_in_s = rjust(&fmt_tok(sess_in), IN_W);
-        let sess_out_s = rjust(&fmt_tok(sess_out), OUT_W);
-
-        let in_cluster = format!(
-            "{}{}{RESET} {}in{RESET} {}{sess_in_s}{RESET}",
-            t.tok_arrow, in_icon, t.label, t.tok,
-        );
-        let out_cluster = format!(
-            "{}{}{RESET} {}out{RESET} {}{sess_out_s}{RESET}",
-            t.tok_arrow, out_icon, t.label, t.tok,
-        );
-
-        let cost_cluster = if extras.show_cost {
-            let day_clr = self.day_cost_colour(day_cost);
-            let cost1 = fmt_money(sess_cost);
-            let cost2 = fmt_money(day_cost);
-            format!(
-                "{}{ICON_COST}{RESET}{}{cost1}{RESET} {}sess{RESET} {}·{RESET} {day_clr}{cost2}{RESET} {}today{RESET}",
-                t.safe, t.cost, t.label, t.label, t.label,
-            )
-        } else {
-            String::new()
-        };
-
-        let rate_label = format!(
-            "{}{ICON_TOK_RATE} {}{}{RESET}{} t/m{RESET}",
-            t.tok_icon,
-            t.tok,
-            fmt_tok(tok_rate),
+        let tokens = format!(
+            "{}↓{RESET} {}in{RESET} {}{}{RESET}{GAP}{}↑{RESET} {}out{RESET} {}{}{RESET}",
+            t.tok_arrow,
             t.label,
+            t.tok,
+            rjust(&fmt_tok(sess_in), IN_W),
+            t.tok_arrow,
+            t.label,
+            t.tok,
+            rjust(&fmt_tok(sess_out), OUT_W),
         );
+        let cost_cluster = cost.map(|(sess, day)| {
+            format!(
+                "{}{ICON_COST}{RESET}{}{}{RESET} {}sess{RESET} {}·{RESET} {}{}{RESET} {}today{RESET}",
+                t.safe,
+                t.cost,
+                fmt_money(sess),
+                t.label,
+                t.label,
+                self.day_cost_colour(day),
+                fmt_money(day),
+                t.label,
+            )
+        });
 
-        let bar_w = sparkline_bar_w(box_width, sess_cost, day_cost, tok_rate, extras.show_cost);
-        let sparkline = if bar_w <= 0 {
-            String::new()
-        } else {
-            // Always show the bottom half of the sparkline. When activity is
-            // zero the bottom row renders a baseline of `▁` glyphs in the
-            // theme's spark colour (typically red) so the sparkline area is
-            // always visible; with history it shows the bar heights up to
-            // `█` saturation.
-            let history: Vec<i32> = if extras.spark_history.is_empty() {
-                vec![0; bar_w as usize]
-            } else {
-                let mut h = extras.spark_history.clone();
-                h.reverse();
-                if h.len() > bar_w as usize {
-                    h[h.len() - bar_w as usize..].to_vec()
-                } else if h.len() < bar_w as usize {
-                    let mut padded = vec![0; bar_w as usize - h.len()];
-                    padded.extend_from_slice(&h);
-                    padded
-                } else {
-                    h
+        let extra_cluster = extra_usage.map(|spend| {
+            let amount = match spend {
+                ExtraSpend::Estimated(usd) => format!("~{}", fmt_money(usd)),
+                ExtraSpend::Actual { used, limit } => {
+                    format!("{} of {}", fmt_money(used), fmt_money(limit))
                 }
             };
-            let (_top, bot) = self
-                .gradient()
-                .sparkline(&history, !extras.spark_history.is_empty());
-            bot
-        };
+            format!(
+                "{}{ICON_COST}{RESET} {}extra usage{RESET} {}{amount}{RESET}",
+                t.alert, t.label, t.alert,
+            )
+        });
 
-        // Compose: in   out   [cost   ]rate  sparkline
-        let mut line = String::new();
-        line.push_str(&in_cluster);
-        line.push_str(&" ".repeat(GAP_BETWEEN as usize));
-        line.push_str(&out_cluster);
-        if extras.show_cost {
-            line.push_str(&" ".repeat(GAP_BETWEEN as usize));
-            line.push_str(&cost_cluster);
+        let join = |parts: &[String]| parts.join(GAP);
+        let mut candidates: Vec<(Vec<String>, &[UsageLimit], bool)> = Vec::new();
+        for n in (1..=limits.len()).rev() {
+            let lims = &limits[..n];
+            let head: Vec<String> = cost_cluster.iter().cloned().collect();
+            candidates.push((head.clone(), lims, true));
+            candidates.push((head, lims, false));
         }
-        line.push_str(&" ".repeat(GAP_BETWEEN as usize));
-        line.push_str(&rate_label);
-        line.push_str(&" ".repeat(GAP_RATE_SPARK as usize));
-        line.push_str(&sparkline);
+        let mut head = vec![tokens.clone()];
+        head.extend(cost_cluster.clone());
+        candidates.push((head, &[], false));
 
-        // `mark_col` for the seam decoration. The line starts at column 2
-        // (after the leading-space pad). Fixed prefix up to start of
-        // sparkline gives mark_col = 2 + (line-pre-spark visible width)
-        // + (bar_w / 2).
-        let mark_col = if bar_w > 0 {
-            let pre_spark_w = visible_width(&line) as i32 - bar_w;
-            2 + pre_spark_w + bar_w / 2
-        } else {
-            0
-        };
-
-        TokensCost { line, mark_col }
+        for (head, lims, with_bars) in &candidates {
+            let bare: Vec<String> = head
+                .iter()
+                .cloned()
+                .chain(
+                    lims.iter()
+                        .enumerate()
+                        .map(|(i, l)| self.limit_cluster(l, 0, !same_reset_as_next(lims, i))),
+                )
+                .chain(extra_cluster.clone())
+                .collect();
+            let base_w = visible_width(&join(&bare));
+            let widths: Vec<usize> = if *with_bars {
+                let spare = content_w.saturating_sub(base_w);
+                let even = (spare / lims.len()).saturating_sub(1).min(MAX_BAR);
+                if even >= MIN_BAR {
+                    vec![even; lims.len()]
+                } else {
+                    let first = spare.saturating_sub(1).min(MAX_BAR);
+                    if first < MIN_BAR {
+                        continue;
+                    }
+                    let mut ws = vec![0; lims.len()];
+                    ws[0] = first;
+                    ws
+                }
+            } else if base_w > content_w {
+                continue;
+            } else {
+                vec![0; lims.len()]
+            };
+            let parts: Vec<String> =
+                head.iter()
+                    .cloned()
+                    .chain(
+                        lims.iter().zip(&widths).enumerate().map(|(i, (l, &w))| {
+                            self.limit_cluster(l, w, !same_reset_as_next(lims, i))
+                        }),
+                    )
+                    .chain(extra_cluster.clone())
+                    .collect();
+            let line = join(&parts);
+            let pad = content_w.saturating_sub(visible_width(&line));
+            return format!("{line}{}", " ".repeat(pad));
+        }
+        " ".repeat(content_w)
     }
 }
 
@@ -239,6 +369,30 @@ impl Renderer {
 mod tests {
     use super::*;
     use crate::ansi::strip_ansi;
+
+    fn session(pct: f64) -> UsageLimit {
+        UsageLimit {
+            label: "session".into(),
+            used_pct: pct,
+            resets_in_secs: Some(2 * 3600 + 13 * 60),
+            now: 0.0,
+            pace_delta: None,
+            trend: None,
+            elapsed_frac: None,
+        }
+    }
+
+    fn week(pct: f64) -> UsageLimit {
+        UsageLimit {
+            label: "week".into(),
+            used_pct: pct,
+            resets_in_secs: Some(3 * 86_400 + 4 * 3600),
+            now: 0.0,
+            pace_delta: None,
+            trend: None,
+            elapsed_frac: None,
+        }
+    }
 
     #[test]
     fn fmt_money_basics() {
@@ -249,121 +403,307 @@ mod tests {
     }
 
     #[test]
-    fn tokens_cost_single_line() {
-        let r = Renderer::default();
-        let result = r.tokens_cost(1, 2, 0.01, 0.02, 0, &TokensCostExtras::new(), 160);
-        // Just one line, no newline.
-        assert!(!result.line.contains('\n'));
+    fn clock_shows_time_within_a_day_and_weekday_beyond() {
+        use chrono::Utc;
+        // 2026-09-24 (Thu) 10:00 UTC.
+        let now = 1_790_244_000.0;
+        let f = |secs, round| fmt_clock_in(&Utc, now, secs, round);
+        assert_eq!(f(2 * 3600 + 51 * 60, 1), "12:51pm");
+        assert_eq!(f(23 * 3600, 1), "9am", "within 24h, even though tomorrow");
+        assert_eq!(f(24 * 3600 + 60, 1), "Fri 10:01am");
+        assert_eq!(f(3 * 86_400 + 23 * 3600, 1), "Mon 9am");
+        assert_eq!(f(19 * 3600 + 8 * 60, 15), "5:15am");
     }
 
     #[test]
-    fn tokens_cost_labels_present() {
-        let r = Renderer::default();
-        let result = r.tokens_cost(120_000, 3_400, 0.18, 1.42, 0, &TokensCostExtras::new(), 160);
-        let plain = strip_ansi(&result.line);
-        assert!(plain.contains("in"), "missing 'in' label: {plain}");
-        assert!(plain.contains("out"), "missing 'out' label: {plain}");
-        assert!(plain.contains("120.0K"), "missing in value: {plain}");
-        assert!(plain.contains("3.4K"), "missing out value: {plain}");
+    fn fmt_reset_tiers() {
+        assert_eq!(fmt_reset(30), "<1m");
+        assert_eq!(fmt_reset(45 * 60), "45m");
+        assert_eq!(fmt_reset(2 * 3600 + 5 * 60), "2h05m");
+        assert_eq!(fmt_reset(3 * 86_400 + 4 * 3600 + 59), "3d4h");
+        assert_eq!(fmt_reset(-5), "<1m");
     }
 
     #[test]
-    fn tokens_cost_no_cache_read_parenthetical() {
+    fn tokens_labels_present() {
         let r = Renderer::default();
-        // cache-read is no longer a parameter — verify no `(NNN)` cluster
-        // shows up between the icon and the rjust column.
-        let result = r.tokens_cost(120_000, 3_400, 0.18, 1.42, 0, &TokensCostExtras::new(), 160);
-        let plain = strip_ansi(&result.line);
-        // No parenthesised digit cluster after the in icon.
-        assert!(
-            !plain.contains("(0)") && !plain.contains("(    0)"),
-            "cache-read parenthetical leaked: {plain}",
-        );
+        let plain = strip_ansi(&r.tokens_cost(120_000, 3_400, None, &[], None, 160)).into_owned();
+        assert!(plain.contains("in 120.0K"), "{plain}");
+        assert!(plain.contains("out   3.4K"), "{plain}");
     }
 
     #[test]
-    fn tokens_cost_consolidated_cost_cell() {
+    fn cost_cell_renders_when_given() {
         let r = Renderer::default();
-        let result = r.tokens_cost(1, 2, 0.18, 1.42, 0, &TokensCostExtras::new(), 160);
-        let plain = strip_ansi(&result.line);
+        let plain =
+            strip_ansi(&r.tokens_cost(1, 2, Some((0.18, 1.42)), &[], None, 160)).into_owned();
         assert!(plain.contains("$0.18 sess · $1.42 today"), "{plain}");
     }
 
     #[test]
-    fn tokens_cost_hidden_cost_blanks_cluster() {
+    fn cost_cell_absent_without_cost() {
         let r = Renderer::default();
-        let extras = TokensCostExtras {
-            show_cost: false,
-            ..Default::default()
-        };
-        let result = r.tokens_cost(1, 2, 0.42, 12.34, 0, &extras, 160);
-        let plain = strip_ansi(&result.line);
-        assert!(
-            !plain.contains('$'),
-            "no dollar sign when cost hidden: {plain}"
-        );
-        assert!(!plain.contains("0.42"), "session cost leaked: {plain}");
-        assert!(!plain.contains("12.34"), "day cost leaked: {plain}");
+        let plain =
+            strip_ansi(&r.tokens_cost(1, 2, None, &[session(10.0)], None, 160)).into_owned();
+        assert!(!plain.contains('$'), "{plain}");
     }
 
     #[test]
-    fn tokens_cost_width_fills_box() {
+    fn limits_render_pct_and_reset() {
         let r = Renderer::default();
-        for box_width in [80i32, 100, 130, 160, 200] {
-            let result = r.tokens_cost(120, 34, 0.1, 0.2, 0, &TokensCostExtras::new(), box_width);
-            // The renderer doesn't pad to box_width — that's the layout's job
-            // via border_line. But the line's visible width must equal what
-            // sparkline_bar_w predicted plus the fixed clusters.
-            let bar_w = sparkline_bar_w(box_width, 0.1, 0.2, 0, true);
-            let predicted = box_width - 3;
-            assert_eq!(
-                visible_width(&result.line) as i32,
-                predicted,
-                "box_width={box_width} bar_w={bar_w}: line width should equal box - 3",
+        let line = r.tokens_cost(1, 2, None, &[session(61.0), week(89.0)], None, 140);
+        let plain = strip_ansi(&line).into_owned();
+        assert!(plain.contains("session  61% "), "{plain}");
+        assert_eq!(plain.matches(" resets ").count(), 2, "{plain}");
+        assert!(plain.contains("week  89% "), "{plain}");
+        assert!(plain.contains(bar::FILLED), "expected bars at 140: {plain}");
+        assert!(
+            !plain.contains("↓ in"),
+            "limits replace the token counts: {plain}"
+        );
+    }
+
+    #[test]
+    fn actual_extra_spend_shows_used_of_limit() {
+        let r = Renderer::default();
+        let spend = ExtraSpend::Actual {
+            used: 130.96,
+            limit: 500.0,
+        };
+        let line = r.tokens_cost(1, 2, None, &[session(100.0)], Some(spend), 140);
+        let plain = strip_ansi(&line).into_owned();
+        assert!(plain.contains("extra usage $130.96 of $500.00"), "{plain}");
+    }
+
+    #[test]
+    fn narrow_box_drops_bars_then_tokens_before_limits() {
+        let r = Renderer::default();
+        let plain = strip_ansi(&r.tokens_cost(1, 2, None, &[session(61.0), week(89.0)], None, 80))
+            .into_owned();
+        assert!(plain.contains("session"), "{plain}");
+        assert!(plain.contains("week"), "{plain}");
+        assert!(!plain.contains("↓ in"), "{plain}");
+    }
+
+    #[test]
+    fn extra_usage_renders_and_survives_narrow_boxes() {
+        let r = Renderer::default();
+        for box_width in [80, 140] {
+            let line = r.tokens_cost(
+                1,
+                2,
+                None,
+                &[session(100.0)],
+                Some(ExtraSpend::Estimated(3.41)),
+                box_width,
             );
+            let plain = strip_ansi(&line).into_owned();
+            assert!(plain.contains("extra usage ~$3.41"), "{plain}");
+            assert_eq!(visible_width(&line) as i32, box_width - 3);
         }
     }
 
     #[test]
-    fn tokens_cost_sparkline_present_with_history() {
+    fn limit_colour_tracks_usage_and_pace() {
         let r = Renderer::default();
-        let extras = TokensCostExtras {
-            spark_history: vec![10, 20, 30, 40, 50, 60, 70, 80],
-            ..TokensCostExtras::new()
+        assert_eq!(r.limit_colour(&session(10.0)), r.theme.safe);
+        assert_eq!(r.limit_colour(&session(75.0)), r.theme.warn);
+        assert_eq!(r.limit_colour(&session(95.0)), r.theme.alert);
+        let fast = UsageLimit {
+            pace_delta: Some(25.0),
+            ..session(30.0)
         };
-        let result = r.tokens_cost(1, 2, 0.01, 0.02, 1000, &extras, 160);
-        let plain = strip_ansi(&result.line);
-        // Sparkline glyphs come from the SPARK_* constants — they're in the
-        // Symbols for Legacy Computing block.
-        assert!(
-            plain
-                .chars()
-                .any(|c| ('\u{1FB00}'..='\u{1FBFF}').contains(&c)),
-            "expected sparkline glyphs: {plain}",
-        );
+        assert_eq!(r.limit_colour(&fast), r.theme.warn);
     }
 
     #[test]
-    fn sparkline_bar_w_matches_render() {
+    fn line_width_always_fills_box() {
         let r = Renderer::default();
-        for &show_cost in &[true, false] {
-            for &box_width in &[80i32, 100, 130, 160, 200] {
-                for &tok_rate in &[0u64, 12, 4567, 999_999] {
-                    let predicted = sparkline_bar_w(box_width, 0.18, 1.42, tok_rate, show_cost);
-                    let extras = TokensCostExtras {
-                        show_cost,
-                        ..TokensCostExtras::new()
-                    };
-                    let result = r.tokens_cost(120, 34, 0.18, 1.42, tok_rate, &extras, box_width);
-                    let actual_line_w = visible_width(&result.line) as i32;
+        let all = [session(61.0), week(89.0)];
+        for box_width in [56i32, 70, 80, 100, 130, 160, 200] {
+            for lims in [&all[..], &all[..1], &[]] {
+                for cost in [None, Some((12.5, 1234.0))] {
+                    let line = r.tokens_cost(120_000, 34_000, cost, lims, None, box_width);
                     assert_eq!(
-                        actual_line_w,
+                        visible_width(&line) as i32,
                         box_width - 3,
-                        "show_cost={show_cost} box={box_width} tok_rate={tok_rate}: \
-                         predicted bar_w={predicted}, line width mismatch",
+                        "box={box_width} lims={} cost={cost:?}: {:?}",
+                        lims.len(),
+                        strip_ansi(&line),
                     );
                 }
             }
         }
+    }
+
+    const H: f64 = 3600.0;
+
+    /// 5h window, 3h in, burning 20%/h throughout.
+    fn steady_trend() -> Trend {
+        Trend {
+            start: 0.0,
+            end: 5.0 * H,
+            now: 3.0 * H,
+            samples: vec![(1.0 * H, 20.0), (2.0 * H, 40.0), (3.0 * H, 60.0)],
+            lookback: 0.5 * H,
+        }
+    }
+
+    #[test]
+    fn forecast_uses_recent_slope() {
+        let t = Trend {
+            start: 0.0,
+            end: 5.0 * H,
+            now: 3.0 * H,
+            samples: vec![(2.5 * H, 40.0), (3.0 * H, 60.0)],
+            lookback: 0.5 * H,
+        };
+        // Last 30 min: +20% → 40%/h, so the remaining 40% takes 1h.
+        let secs = t.secs_to_full().unwrap();
+        assert!((secs - H).abs() < 1.0, "{secs}");
+    }
+
+    #[test]
+    fn forecast_needs_rising_usage() {
+        let t = Trend {
+            samples: vec![(2.5 * H, 60.0), (3.0 * H, 60.0)],
+            ..steady_trend()
+        };
+        assert_eq!(t.secs_to_full(), None);
+    }
+
+    #[test]
+    fn bar_fills_to_usage_with_pace_marker_at_elapsed_time() {
+        let r = Renderer::default();
+        let l = UsageLimit {
+            elapsed_frac: Some(0.43),
+            ..session(13.0)
+        };
+        let plain = strip_ansi(&r.limit_cluster(&l, 10, true)).into_owned();
+        assert!(plain.contains("13% █░░░│░░░░░ resets"), "{plain}");
+    }
+
+    #[test]
+    fn marker_sits_inside_fill_when_over_pace() {
+        let r = Renderer::default();
+        let l = UsageLimit {
+            elapsed_frac: Some(0.3),
+            ..session(62.0)
+        };
+        let plain = strip_ansi(&r.limit_cluster(&l, 10, true)).into_owned();
+        assert!(plain.contains("███│▓▓░░░░ resets"), "{plain}");
+    }
+
+    #[test]
+    fn forecast_warns_when_full_before_reset() {
+        let r = Renderer::default();
+        let on_track = UsageLimit {
+            resets_in_secs: Some((2.0 * H) as i64),
+            trend: Some(steady_trend()),
+            ..session(60.0)
+        };
+        // 20%/h from 60% → full in 2h, same as the reset.
+        let plain = strip_ansi(&r.limit_cluster(&on_track, 10, true)).into_owned();
+        assert!(!plain.contains("maxed at"), "{plain}");
+
+        let short = UsageLimit {
+            resets_in_secs: Some((3.0 * H) as i64),
+            ..on_track
+        };
+        let plain = strip_ansi(&r.limit_cluster(&short, 10, true)).into_owned();
+        assert!(plain.contains(" maxed at ~"), "{plain}");
+        assert!(plain.contains(" · resets "), "{plain}");
+        assert_eq!(r.limit_colour(&short), r.theme.warn);
+    }
+
+    #[test]
+    fn pace_line_fills_box_at_all_widths() {
+        let r = Renderer::default();
+        let lims = [
+            UsageLimit {
+                elapsed_frac: Some(0.43),
+                trend: Some(steady_trend()),
+                ..session(13.0)
+            },
+            UsageLimit {
+                elapsed_frac: Some(0.47),
+                ..week(81.0)
+            },
+        ];
+        for box_width in [56, 70, 80, 100, 140, 200] {
+            let line = r.tokens_cost(1, 2, None, &lims, None, box_width);
+            assert_eq!(visible_width(&line) as i32, box_width - 3, "{box_width}");
+        }
+    }
+
+    #[test]
+    fn single_sample_forecasts_from_the_window_average() {
+        let day = 24.0 * H;
+        let t = Trend {
+            start: 0.0,
+            end: 7.0 * day,
+            now: 3.4 * day,
+            samples: vec![(3.4 * day, 81.0)],
+            lookback: day,
+        };
+        // 81% over 3.4 days leaves 19% at ~23.8%/day ≈ 19.2h.
+        let hours = t.secs_to_full().unwrap() / H;
+        assert!((hours - 19.15).abs() < 0.1, "{hours}");
+    }
+
+    #[test]
+    fn limits_resetting_together_share_one_label() {
+        let r = Renderer::default();
+        let fable = UsageLimit {
+            label: "Fable".into(),
+            ..week(82.0)
+        };
+        let line = r.tokens_cost(1, 2, None, &[session(13.0), week(84.0), fable], None, 140);
+        let plain = strip_ansi(&line).into_owned();
+        assert_eq!(plain.matches(" resets ").count(), 2, "{plain}");
+        let week_at = plain.find("week").unwrap();
+        let fable_at = plain.find("Fable").unwrap();
+        assert!(!plain[week_at..fable_at].contains("resets"), "{plain}");
+    }
+
+    #[test]
+    fn one_quantisation_step_does_not_swing_the_forecast() {
+        // Flat at 60% for 25 min, then a single 1% step at the last sample.
+        let mut samples: Vec<(f64, f64)> = (0..=5)
+            .map(|i| (2.5 * H + i as f64 * 300.0, 60.0))
+            .collect();
+        samples.push((3.0 * H, 61.0));
+        let t = Trend {
+            start: 0.0,
+            end: 5.0 * H,
+            now: 3.0 * H,
+            samples,
+            lookback: 0.5 * H,
+        };
+        // Two-point would say 2%/h → full in 19.5h; the fit is far gentler.
+        let hours = t.secs_to_full().unwrap() / H;
+        assert!(hours > 27.0, "{hours}");
+    }
+
+    #[test]
+    fn weekly_rate_follows_the_last_day_not_the_week() {
+        let day = 24.0 * H;
+        // Idle at 20% for three days, then 40 points in the last 24h.
+        let t = Trend {
+            start: 0.0,
+            end: 7.0 * day,
+            now: 4.0 * day,
+            samples: vec![
+                (1.0 * day, 20.0),
+                (3.0 * day, 20.0),
+                (3.5 * day, 40.0),
+                (4.0 * day, 60.0),
+            ],
+            lookback: day,
+        };
+        // Last day: 40%/day → the remaining 40% lasts ~1 day. The week
+        // average (15%/day) would have said ~2.7 days.
+        let days = t.secs_to_full().unwrap() / day;
+        assert!((days - 1.0).abs() < 0.05, "{days}");
     }
 }

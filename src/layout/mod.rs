@@ -7,7 +7,6 @@ use crate::config::Env;
 use crate::glyphs::RESET;
 use crate::input::session::SessionInfo;
 use crate::render::pill::{Edge, Pill};
-use crate::render::sections::context_bar::effective_soft_limit;
 use crate::render::Renderer;
 use crate::theme::Theme;
 
@@ -118,31 +117,28 @@ pub struct LayoutSpec {
     pub rows: Vec<RowSpec>,
 }
 
-/// Build the styled top-right border chip: `<session-id>  <clock-glyph> <elapsed>`.
-///
-/// The full session id is rendered (no truncation). The elapsed cluster is
-/// prefixed with a clock glyph. Returns empty when both inputs are empty.
-pub fn session_id_chip(theme: &Theme, session_id: &str, elapsed: &str) -> String {
-    use crate::glyphs::GLYPH_CLOCK;
-    if session_id.is_empty() && elapsed.is_empty() {
+/// `<name>  <session-id>  <clock-glyph> <elapsed>`, skipping empty parts.
+pub fn session_id_chip(theme: &Theme, name: &str, session_id: &str, elapsed: &str) -> String {
+    use crate::glyphs::{BOLD, GLYPH_CLOCK};
+    const MAX_NAME_CHARS: usize = 32;
+    let name = if name.chars().count() > MAX_NAME_CHARS {
+        let head: String = name.chars().take(MAX_NAME_CHARS - 1).collect();
+        format!("{head}…")
+    } else {
+        name.to_string()
+    };
+    let parts: Vec<String> = [
+        (!name.is_empty()).then(|| format!("{BOLD}{}{name}{RESET}", theme.session)),
+        (!session_id.is_empty()).then(|| format!("{}{session_id}{RESET}", theme.session)),
+        (!elapsed.is_empty()).then(|| format!("{}{GLYPH_CLOCK} {elapsed}{RESET}", theme.time)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if parts.is_empty() {
         return String::new();
     }
-    let id_part = if session_id.is_empty() {
-        String::new()
-    } else {
-        format!("{}{session_id}{RESET}", theme.session)
-    };
-    let time_part = if elapsed.is_empty() {
-        String::new()
-    } else {
-        format!("{}{GLYPH_CLOCK} {elapsed}{RESET}", theme.time)
-    };
-    match (id_part.is_empty(), time_part.is_empty()) {
-        (false, false) => format!(" {id_part}  {time_part} "),
-        (false, true) => format!(" {id_part} "),
-        (true, false) => format!(" {time_part} "),
-        (true, true) => String::new(),
-    }
+    format!(" {} ", parts.join("  "))
 }
 
 /// Render an assembled `LayoutSpec` into one string per row.
@@ -161,12 +157,9 @@ pub fn render_layout(spec: &LayoutSpec, r: &Renderer) -> Vec<String> {
             RowKind::BottomBorder => {
                 out.push(border.border_bottom(spec.width, &row.ups, spec.fill))
             }
-            RowKind::Separator | RowKind::SeparatorSeam => out.push(border.border_separator(
-                spec.width,
-                &row.ups,
-                spec.fill,
-                &row.left_chip,
-            )),
+            RowKind::Separator | RowKind::SeparatorSeam => {
+                out.push(border.border_separator(spec.width, &row.ups, spec.fill, &row.left_chip))
+            }
             RowKind::SeparatorDim => out.push(border.border_separator_dim(
                 spec.width,
                 &row.downs,
@@ -190,14 +183,8 @@ pub fn render_layout(spec: &LayoutSpec, r: &Renderer) -> Vec<String> {
     out
 }
 
-/// Compute the `fill` from a session's context-window totals, using the
-/// per-session effective limit so the gradient fill scales with the model's
-/// reported `context_window_size`.
 pub fn fill_ratio(session: &SessionInfo) -> f64 {
-    let ctx = &session.context_window;
-    let total = ctx.total_input_tokens + ctx.total_output_tokens;
-    let limit = effective_soft_limit(ctx.context_window_size);
-    ((total as f64) / (limit as f64)).min(1.0)
+    session.context_window.used_pct().unwrap_or(0.0) / 100.0
 }
 
 /// Top-level entry: pick the right composition, run it, return joined lines.
@@ -301,7 +288,7 @@ mod tests {
     #[test]
     fn session_id_chip_empty_when_inputs_empty() {
         assert_eq!(
-            session_id_chip(&crate::theme::builtin::CLAUDE_DARK, "", ""),
+            session_id_chip(&crate::theme::builtin::CLAUDE_DARK, "", "", ""),
             ""
         );
     }
@@ -310,6 +297,7 @@ mod tests {
     fn session_id_chip_renders_full_id_and_clock_elapsed() {
         let s = session_id_chip(
             &crate::theme::builtin::CLAUDE_DARK,
+            "",
             "51e977df-abc123def",
             "1h23m",
         );
@@ -327,9 +315,29 @@ mod tests {
 
     #[test]
     fn session_id_chip_short_id_renders_verbatim() {
-        let s = session_id_chip(&crate::theme::builtin::CLAUDE_DARK, "abc", "");
+        let s = session_id_chip(&crate::theme::builtin::CLAUDE_DARK, "", "abc", "");
         let plain = crate::ansi::strip_ansi(&s);
         assert!(plain.contains("abc"));
         assert!(!plain.contains('…'));
+    }
+
+    #[test]
+    fn session_id_chip_puts_name_left_of_id() {
+        let s = session_id_chip(
+            &crate::theme::builtin::CLAUDE_DARK,
+            "usage-graph",
+            "51e977df",
+            "5m",
+        );
+        let plain = crate::ansi::strip_ansi(&s);
+        assert!(plain.starts_with(" usage-graph  51e977df  "), "{plain}");
+    }
+
+    #[test]
+    fn session_id_chip_truncates_long_names() {
+        let long = "a".repeat(50);
+        let s = session_id_chip(&crate::theme::builtin::CLAUDE_DARK, &long, "id", "");
+        let plain = crate::ansi::strip_ansi(&s);
+        assert!(plain.contains(&format!("{}…  id", "a".repeat(31))), "{plain}");
     }
 }

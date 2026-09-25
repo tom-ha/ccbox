@@ -4,6 +4,7 @@ use crate::layout::{LayoutSpec, RowKind, RowSpec};
 
 use super::component::{Component, SeparatorPolicy};
 use super::context::ComponentContext;
+use super::attention_row::ATTENTION_ROW;
 use super::context_row::CONTEXT_ROW;
 use super::footer::FOOTER;
 use super::openspec_row::OPENSPEC_ROW;
@@ -26,7 +27,7 @@ impl Composition<'static> {
     /// Composition for `width < NARROW_WIDTH`: subagents (if any) above the
     /// compact context line.
     pub fn narrow() -> Self {
-        static BODY: &[&dyn Component] = &[&SUBAGENTS_ROW, &CONTEXT_ROW];
+        static BODY: &[&dyn Component] = &[&ATTENTION_ROW, &SUBAGENTS_ROW, &CONTEXT_ROW];
         Self {
             header: &TOP_HEADER,
             body: BODY,
@@ -38,7 +39,7 @@ impl Composition<'static> {
     /// tokens-cost, tasks, subagents. No openspec, no plugins-skills.
     pub fn medium() -> Self {
         static BODY: &[&dyn Component] =
-            &[&CONTEXT_ROW, &TOKENS_COST_ROW, &TASKS_ROW, &SUBAGENTS_ROW];
+            &[&ATTENTION_ROW, &CONTEXT_ROW, &TOKENS_COST_ROW, &TASKS_ROW, &SUBAGENTS_ROW];
         Self {
             header: &TOP_HEADER,
             body: BODY,
@@ -49,6 +50,7 @@ impl Composition<'static> {
     /// Composition for `width >= MEDIUM_WIDTH`: full set of event-driven rows.
     pub fn wide() -> Self {
         static BODY: &[&dyn Component] = &[
+            &ATTENTION_ROW,
             &CONTEXT_ROW,
             &TOKENS_COST_ROW,
             &PLUGINS_SKILLS_ROW,

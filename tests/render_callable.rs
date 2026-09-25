@@ -266,20 +266,17 @@ fn ccbox_show_subagents_independent_of_tasks() {
 }
 
 #[test]
-fn tokens_row_has_augmented_labels() {
+fn tokens_row_shows_limits_for_subscriptions_and_tokens_for_api() {
     let mut sc = scratch();
-    // Force cost visible so the tokens row renders with the cost cluster.
     sc.env.show_cost_override = Some(true);
-    let s = render(&fixture(), &sc.env, 130);
-    let plain = strip_ansi(&s);
-    assert!(
-        plain.contains(" in "),
-        "expected augmented 'in' label: {plain}"
-    );
-    assert!(
-        plain.contains(" out "),
-        "expected augmented 'out' label: {plain}"
-    );
+    let plain = strip_ansi(&render(&fixture(), &sc.env, 130)).into_owned();
+    assert!(plain.contains("session"), "subscription shows limits: {plain}");
+    assert!(!plain.contains("↓ in"), "limits replace tokens: {plain}");
+
+    let mut api = fixture();
+    api.rate_limits = Default::default();
+    let plain = strip_ansi(&render(&api, &sc.env, 130)).into_owned();
+    assert!(plain.contains(" in ") && plain.contains(" out "), "{plain}");
 }
 
 #[test]

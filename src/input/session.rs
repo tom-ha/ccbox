@@ -157,6 +157,26 @@ pub struct ContextWindow {
     pub remaining_percentage: Option<f64>,
 }
 
+impl ContextWindow {
+    /// `total_*_tokens` are cumulative session counters, not window occupancy.
+    pub fn used_tokens(&self) -> u64 {
+        let u = &self.current_usage;
+        u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens
+    }
+
+    pub fn used_pct(&self) -> Option<f64> {
+        if let Some(p) = self.used_percentage {
+            return Some(p.clamp(0.0, 100.0));
+        }
+        if self.context_window_size == 0 {
+            return None;
+        }
+        Some(
+            (self.used_tokens() as f64 / self.context_window_size as f64 * 100.0).clamp(0.0, 100.0),
+        )
+    }
+}
+
 // ---------- Top-level SessionInfo -------------------------------------------
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

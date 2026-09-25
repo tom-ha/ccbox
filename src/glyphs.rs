@@ -47,7 +47,6 @@ pub const CLR_ALERT: &str = "\x1b[38;5;167m";
 // --- Nerd Font / Unicode glyphs ---------------------------------------------
 
 pub const ICON_COST: &str = "\u{efc8}"; // nf-md currency-usd
-pub const ICON_TOK_RATE: &str = "\u{f0830}"; // nf-md coin
 pub const GLYPH_MODEL: &str = "\u{f08b9}"; // nf-md-monitor-dashboard
 pub const GLYPH_THINKING: &str = "\u{f1a53}"; // nf-md-brain
 pub const GLYPH_BURN_FAST: &str = "\u{ef76}"; // nf-cod-zap

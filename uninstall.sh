@@ -32,16 +32,41 @@ path = pathlib.Path(sys.argv[1])
 data = json.loads(path.read_text() or "{}")
 sl = data.get("statusLine")
 cmd = sl.get("command") if isinstance(sl, dict) else None
+changed = False
 if cmd and pathlib.PurePosixPath(cmd).name == "ccbox":
     data.pop("statusLine", None)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    tmp.replace(path)
+    changed = True
     print(f"==> removed statusLine.command ({cmd}) from {path}")
 elif cmd:
     print(f"==> statusLine.command is {cmd!r}, not ccbox — leaving it alone")
 else:
     print(f"==> no statusLine entry in {path} — nothing to unwire")
+
+hooks = data.get("hooks")
+if isinstance(hooks, dict):
+    removed = 0
+    for event in list(hooks):
+        kept_groups = []
+        for g in hooks[event] if isinstance(hooks[event], list) else []:
+            inner = g.get("hooks", []) if isinstance(g, dict) else []
+            kept = [h for h in inner if not str(h.get("command", "")).endswith("ccbox hook")]
+            removed += len(inner) - len(kept)
+            if kept:
+                kept_groups.append({**g, "hooks": kept})
+        if kept_groups:
+            hooks[event] = kept_groups
+        else:
+            del hooks[event]
+    if not hooks:
+        data.pop("hooks")
+    if removed:
+        changed = True
+        print(f"==> removed {removed} ccbox hook(s) from {path}")
+
+if changed:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(path)
 PY
 else
   echo "==> $SETTINGS does not exist — nothing to unwire"

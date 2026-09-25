@@ -8,7 +8,8 @@ A fast, Rust statusline for [Claude Code](https://claude.com/claude-code) — dr
 ## Features
 
 - **Model identity** — see which Claude model the session is on at a glance.
-- **Context-window burn** — token count, percentage, and a progress bar, with thresholds that adapt to 200K and 1M models.
+- **Context-window burn** — tokens in the window, percentage of the window used, and a progress bar.
+- **Usage limits** — 5-hour session and weekly subscription limits with time until reset.
 - **Tokens & cost** — input / output token totals and per-session / per-day spend (auto-hidden for subscription accounts).
 - **Tasks** — todo / doing / done counts inline, or a multi-column kanban **board** view for wider terminals.
 - **Subagents** — in-flight subagent activity from the current session.
@@ -28,7 +29,7 @@ A fast, Rust statusline for [Claude Code](https://claude.com/claude-code) — dr
 curl -fsSL https://raw.githubusercontent.com/tom-ha/ccbox/main/install.sh | bash
 ```
 
-This runs `cargo install --git` to build the binary, then patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline. Restart Claude Code afterwards. The installer backs up your existing `settings.json` to `settings.json.bak.YYYYMMDD-HHMMSS`.
+This runs `cargo install --git` to build the binary, then patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline (refreshing every 5s) and runs `ccbox hook` for the "needs you" row. Re-running it is safe; other hooks are left alone. Restart Claude Code afterwards. The installer backs up your existing `settings.json` to `settings.json.bak.YYYYMMDD-HHMMSS`.
 
 Want to read the script before running it? Fetch the same URL without the `| bash` to inspect it (`curl -fsSL https://raw.githubusercontent.com/tom-ha/ccbox/main/install.sh`).
 
@@ -221,17 +222,13 @@ If neither is set, no venv slot is rendered. Activate the venv **before** starti
 
 The cache is per-cwd (FNV1a-hashed for a stable, filesystem-safe filename) and is refreshed atomically via a tempfile + rename, so concurrent ccbox processes don't clobber each other's entries.
 
-### Context-window percentage on 1M-context models
+### Reading the rows
 
-The context-line `%` is computed against an **effective limit** derived from the session's reported `context_window_size`, not a hard-coded constant. The threshold is 75% of the window:
-
-| Model context window | Effective limit | What `100%` means |
-|---|---|---|
-| 200K (default Claude Code) | 150K tokens | Auto-compaction zone. |
-| 1M (e.g. `Opus 4.7 (1M context)`) | 750K tokens | The "you should think about `/compact` soon" line for a 1M window. |
-| Unknown / unreported | 150K tokens | Legacy fallback (the bar still renders as `X of ?`). |
-
-This is automatic — nothing to configure.
+- **Top border** — session ID and time since the session last wrote to its transcript.
+- **Top row** — working directory, git branch with `N changed` (uncommitted files), `N ahead` / `N behind` (commits vs. upstream), and the model with its reasoning effort.
+- **Needs you** — appears only while a session is waiting on you. This session shows a `⏸ NEEDS YOU` badge with what it's waiting for (`permission`, `question`, `your turn`) and for how long; every other waiting session on the machine is listed after it, so any terminal tells you which one is stuck. Driven by Claude Code hooks that `install.sh` registers (`ccbox hook` on `Notification`, `PreToolUse` for `AskUserQuestion`, and `PostToolUse` / `UserPromptSubmit` / `Stop` / `SessionEnd` to clear). Entries clear themselves when the session's Claude Code process exits, when its transcript shows it has moved on, or — for `your turn`, shown dim because nothing is blocked — after 10 minutes; `permission` and `question` stay until answered. Claude Code hides the statusline during a permission prompt, so that session's own badge isn't visible then — the other terminals still show it.
+- **ctx** — tokens currently in the context window, out of the model's window size, and the percentage of the full window used (Claude Code's own `used_percentage`). The colour turns warn/alert as you approach auto-compaction (~75% of the window).
+- **Limits** — on Pro/Max subscriptions: the `session` (5-hour) and `week` (7-day) usage limits, plus per-model weekly limits such as `Fable` with their reset time (`resets 9:30am` within 24 hours — Claude Code's `/usage` threshold — else `resets Mon 12pm`). Each bar fills to the usage %, and a `│` marker shows where usage would be if you spread it evenly over the window. Fill past the marker (usage ahead of that even pace) is drawn red (`▓`). Usage is account-wide (all sessions, plus claude.ai); the marker is purely time. If your current rate would hit the limit before it resets, a red `maxed at ~Fri 1:15pm` forecast appears — from a line fitted through usage samples (logged by every session on this machine) over the last 30 minutes for the session limit and the last 24 hours for weekly limits, so nights and breaks count toward the weekly rate. A limit turns warn at 70%, when it's forecast to run out before reset, or when you're more than 10 points ahead of an even pace; it turns alert at 90%. Once a limit hits 100% and you continue on extra usage, an extra-usage cell appears. If the account data below isn't available, it falls back to an estimate (`~$X`): the list-price cost of everything since the limit was hit, summed across sessions until that window resets. Per-model limits and real extra-usage spend aren't in Claude Code's statusline data, so ccbox asks Claude Code for them: every 5 minutes at most, in the background, it runs `claude -p` with the SDK `get_usage` request — no prompt is sent, so no usage is consumed, and user settings are skipped so none of your hooks run and no transcript is saved. Results are cached in `<claude_dir>/ccbox-cache/account-usage.json` and shared by all sessions. With that data, the extra-usage cell shows your actual spend (`extra usage $130.96 of $500.00`) instead of the estimate. On API billing there are no limits, so the row shows input/output tokens and the `$ sess · $ today` cost cell instead.
 
 ### CLI flags
 
@@ -243,7 +240,7 @@ Usage: ccbox [--theme NAME] [--width COLS] [--full-width] [--bg-shift warm|cool]
 
 #### `--snapshot`
 
-For diagnostics: instead of printing the ANSI-styled box, `--snapshot` writes a single JSON object to stdout containing the parsed `SessionInfo`, resolved `Env`, theme, layout selection, per-component visibility, and the computed values feeding the visible rows (model name, short pwd, branch, costs, tokens-per-minute, fill ratio). No ANSI escapes are emitted.
+For diagnostics: instead of printing the ANSI-styled box, `--snapshot` writes a single JSON object to stdout containing the parsed `SessionInfo`, resolved `Env`, theme, layout selection, per-component visibility, and the computed values feeding the visible rows (model name, short pwd, branch, costs, fill ratio). No ANSI escapes are emitted.
 
 ```bash
 ccbox --snapshot < session.json | jq '.composition.body'

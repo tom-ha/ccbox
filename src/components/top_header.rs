@@ -44,7 +44,8 @@ impl Component for TopHeader {
         let (branch_text, branch_w) = r.branch_chip(git);
 
         let elapsed = session_elapsed(&session.transcript_path, Some(now));
-        let top_right_chip = session_id_chip(r.theme, &session.session_id, &elapsed);
+        let name = ctx.data.session_name(ctx).unwrap_or_default();
+        let top_right_chip = session_id_chip(r.theme, name, &session.session_id, &elapsed);
 
         let content_w = width - 3;
 

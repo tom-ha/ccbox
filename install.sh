@@ -73,18 +73,41 @@ else
 fi
 
 python3 - "$SETTINGS" "$CCBOX_BIN" <<'PY'
-import json, sys, pathlib
+import json, shlex, sys, pathlib
 path = pathlib.Path(sys.argv[1])
 ccbox = sys.argv[2]
 data = json.loads(path.read_text() or "{}")
 prev = data.get("statusLine")
 if prev is not None:
     print(f"==> previous statusLine: {json.dumps(prev)}")
-data["statusLine"] = {"type": "command", "command": ccbox}
+data["statusLine"] = {"type": "command", "command": ccbox, "refreshInterval": 5}
+
+# Hooks feed the "needs you" row. Replace any earlier ccbox hook groups so
+# re-running the installer stays idempotent; other hooks are left alone.
+hook_cmd = f"{shlex.quote(ccbox)} hook"
+def is_ccbox_hook(h):
+    return isinstance(h, dict) and str(h.get("command", "")).endswith("ccbox hook")
+wanted = {
+    "Notification": [""],
+    "PreToolUse": ["AskUserQuestion"],
+    "PostToolUse": [""],
+    "UserPromptSubmit": [""],
+    "Stop": [""],
+    "SessionEnd": [""],
+}
+hooks = data.setdefault("hooks", {})
+for event, matchers in wanted.items():
+    groups = [
+        g for g in hooks.get(event, [])
+        if not (isinstance(g, dict) and g.get("hooks") and all(map(is_ccbox_hook, g["hooks"])))
+    ]
+    for m in matchers:
+        groups.append({"matcher": m, "hooks": [{"type": "command", "command": hook_cmd}]})
+    hooks[event] = groups
 tmp = path.with_suffix(path.suffix + ".tmp")
 tmp.write_text(json.dumps(data, indent=2) + "\n")
 tmp.replace(path)
 PY
 
-echo "==> wrote statusLine.command = $CCBOX_BIN to $SETTINGS"
+echo "==> wrote statusLine.command = $CCBOX_BIN and ccbox hooks to $SETTINGS"
 echo "Done. Restart Claude Code to pick up the new statusline."

@@ -39,6 +39,17 @@ fn read_venv_name() -> Option<String> {
 
 fn main() -> ExitCode {
     let raw_args: Vec<String> = env::args().skip(1).collect();
+    if matches!(raw_args.first().map(String::as_str), Some("usage-refresh")) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        ccbox::data::account_usage::refresh(&resolve_claude_dir(), now);
+        return ExitCode::SUCCESS;
+    }
+    if matches!(raw_args.first().map(String::as_str), Some("hook")) {
+        return run_hook();
+    }
     if matches!(raw_args.first().map(String::as_str), Some("toggle")) {
         return run_toggle(&raw_args[1..]);
     }
@@ -171,6 +182,22 @@ fn parse_bg(v: &str, fallback: BgShift) -> BgShift {
         "cool" => BgShift::Cool,
         _ => fallback,
     }
+}
+
+/// Always exits 0 so a hook can never block or fail the session it runs in.
+fn run_hook() -> ExitCode {
+    use std::io::Read;
+    let mut raw = String::new();
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    if let Ok(input) = serde_json::from_str::<ccbox::data::waiting::HookInput>(&raw) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let owner = ccbox::data::waiting::owner_pid();
+        ccbox::data::waiting::apply_hook(&resolve_claude_dir(), &input, now, owner);
+    }
+    ExitCode::SUCCESS
 }
 
 /// Resolve the Claude config directory the way `main()` does, so the
