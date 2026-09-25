@@ -217,7 +217,7 @@ struct Detail {
     reset: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Add {
     Limit(usize),
     Reset(usize),
@@ -265,20 +265,28 @@ impl Plan {
 
 /// Highest first. The row takes these in order and stops at the first that
 /// doesn't fit, so whatever shows has everything ranked above it showing too.
-/// The first limit (the session) always shows; bars fill what's left.
+/// The first limit (the session) always shows; bars fill what's left. An
+/// exhausted limit's reset jumps ahead: it's when extra billing stops.
 fn priorities(limits: &[UsageLimit]) -> Vec<Add> {
     let windows = limits
         .iter()
         .take_while(|l| !l.per_model)
         .count()
         .clamp(1, 2);
+    let exhausted = (0..windows)
+        .filter(|&i| limits[i].used_pct >= 100.0)
+        .map(Add::Reset);
+    let rest = [Add::Reset(0), Add::Forecast(0), Add::Extra]
+        .into_iter()
+        .chain((1..windows).flat_map(|i| [Add::Reset(i), Add::Forecast(i)]))
+        .chain([Add::Cost])
+        .chain((windows..limits.len()).map(Add::Limit));
     let mut out: Vec<Add> = (1..windows).map(Add::Limit).collect();
-    out.extend([Add::Reset(0), Add::Forecast(0), Add::Extra]);
-    for i in 1..windows {
-        out.extend([Add::Reset(i), Add::Forecast(i)]);
+    for add in exhausted.chain(rest) {
+        if !out.contains(&add) {
+            out.push(add);
+        }
     }
-    out.push(Add::Cost);
-    out.extend((windows..limits.len()).map(Add::Limit));
     out
 }
 
@@ -633,6 +641,13 @@ mod tests {
     fn shown_items_follow_priority_order_at_every_width() {
         let r = Renderer::default();
         let day = 24.0 * H;
+        let weekly = Trend {
+            start: 0.0,
+            end: 7.0 * day,
+            now: 3.0 * day,
+            samples: vec![(2.0 * day, 50.0), (2.5 * day, 70.0), (3.0 * day, 89.0)],
+            lookback: day,
+        };
         let lims = [
             UsageLimit {
                 resets_in_secs: Some((3.0 * H) as i64),
@@ -640,17 +655,12 @@ mod tests {
                 ..session(60.0)
             },
             UsageLimit {
-                trend: Some(Trend {
-                    start: 0.0,
-                    end: 7.0 * day,
-                    now: 3.0 * day,
-                    samples: vec![(2.0 * day, 50.0), (2.5 * day, 70.0), (3.0 * day, 89.0)],
-                    lookback: day,
-                }),
+                trend: Some(weekly.clone()),
                 ..week(89.0)
             },
             UsageLimit {
                 resets_in_secs: Some(5 * 86_400),
+                trend: Some(weekly),
                 ..fable(82.0)
             },
         ];
@@ -670,7 +680,11 @@ mod tests {
                     .unwrap_or("")
                     .to_string()
             };
-            let (sess, wk) = (cluster("session"), cluster("week"));
+            let (sess, wk, fab) = (cluster("session"), cluster("week"), cluster("Fable"));
+            assert!(
+                fab.is_empty() || fab.contains("maxed") && fab.contains("resets"),
+                "{box_width}: a model limit arrives whole: {plain}"
+            );
             let shown = [
                 !wk.is_empty(),
                 sess.contains("resets"),
@@ -679,7 +693,7 @@ mod tests {
                 wk.contains("resets"),
                 wk.contains("maxed"),
                 plain.contains("today"),
-                plain.contains("Fable"),
+                !fab.is_empty(),
             ];
             let count = shown.iter().take_while(|&&s| s).count();
             assert!(
@@ -704,6 +718,40 @@ mod tests {
         let plain = strip_ansi(&line).into_owned();
         assert!(plain.contains("extra usage $130.96 of $500.00"), "{plain}");
         assert!(!plain.contains("Fable"), "{plain}");
+    }
+
+    #[test]
+    fn shared_reset_stays_put_until_the_next_limit_shows_it() {
+        let r = Renderer::default();
+        let spend = Some(ExtraSpend::Estimated(3.41));
+        let lims = [
+            UsageLimit {
+                resets_in_secs: Some(7200),
+                ..session(61.0)
+            },
+            UsageLimit {
+                resets_in_secs: Some(7260),
+                ..week(89.0)
+            },
+        ];
+        let line = r.tokens_cost(1, 2, None, &lims, spend, 60);
+        let plain = strip_ansi(&line).into_owned();
+        assert!(plain.contains(" resets "), "{plain}");
+        assert!(!plain.contains("extra usage"), "{plain}");
+    }
+
+    #[test]
+    fn exhausted_limit_reset_outranks_other_details() {
+        let r = Renderer::default();
+        let spend = Some(ExtraSpend::Actual {
+            used: 130.96,
+            limit: 500.0,
+        });
+        let line = r.tokens_cost(1, 2, None, &[session(20.0), week(100.0)], spend, 50);
+        let plain = strip_ansi(&line).into_owned();
+        let week_at = plain.find("week").unwrap();
+        assert!(plain[week_at..].contains("resets"), "{plain}");
+        assert!(!plain[..week_at].contains("resets"), "{plain}");
     }
 
     #[test]
