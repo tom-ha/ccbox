@@ -283,6 +283,19 @@ fn tokens_row_shows_limits_for_subscriptions_and_tokens_for_api() {
 }
 
 #[test]
+fn narrow_box_shows_limits_but_not_api_tokens() {
+    let sc = scratch();
+    let plain = strip_ansi(&render(&fixture(), &sc.env, 44)).into_owned();
+    assert!(plain.contains("session  61%"), "{plain}");
+    assert!(plain.contains("week  89%"), "{plain}");
+
+    let mut api = fixture();
+    api.rate_limits = Default::default();
+    let plain = strip_ansi(&render(&api, &sc.env, 44)).into_owned();
+    assert!(!plain.contains(" out "), "{plain}");
+}
+
+#[test]
 fn venv_renders_when_env_set() {
     let mut sc = scratch();
     sc.env.venv = Some("py311".to_string());

@@ -172,8 +172,12 @@ impl Component for TokensCostRow {
         "tokens-cost-row"
     }
 
+    /// A narrow box fits the session limit, not API billing's tokens and cost.
     fn is_visible(&self, ctx: &ComponentContext) -> bool {
+        let rl = &ctx.session.rate_limits;
         ctx.width >= NARROW_WIDTH as i32
+            || rl.five_hour.resets_at != 0
+            || rl.seven_day.resets_at != 0
     }
 
     fn render(&self, ctx: &ComponentContext) -> ComponentOutput {
