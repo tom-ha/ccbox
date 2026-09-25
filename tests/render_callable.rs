@@ -283,6 +283,50 @@ fn tokens_row_shows_limits_for_subscriptions_and_tokens_for_api() {
 }
 
 #[test]
+fn narrow_box_shows_limits_but_not_api_tokens() {
+    let sc = scratch();
+    let plain = strip_ansi(&render(&fixture(), &sc.env, 44)).into_owned();
+    assert!(plain.contains("session  61%"), "{plain}");
+    assert!(plain.contains("week  89%"), "{plain}");
+
+    let mut week_only = fixture();
+    week_only.rate_limits.five_hour = Default::default();
+    let plain = strip_ansi(&render(&week_only, &sc.env, 44)).into_owned();
+    assert!(plain.contains("week  89%"), "{plain}");
+
+    let mut api = fixture();
+    api.rate_limits = Default::default();
+    let plain = strip_ansi(&render(&api, &sc.env, 44)).into_owned();
+    assert!(!plain.contains(" out "), "{plain}");
+}
+
+#[test]
+fn account_model_limit_ranks_below_session_details() {
+    let sc = scratch();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let cache = sc.env.claude_dir.join("ccbox-cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let usage = serde_json::json!({
+        "fetched_at": now as f64,
+        "model_limits": [{"name": "Fable", "used_pct": 82.0, "resets_at": now + 5 * 86_400}],
+        "extra_usage": null,
+    });
+    std::fs::write(cache.join("account-usage.json"), usage.to_string()).unwrap();
+    let mut s = fixture();
+    s.rate_limits.five_hour.resets_at = now + 2 * 3600 + 13 * 60;
+    s.rate_limits.seven_day = Default::default();
+
+    let plain = strip_ansi(&render(&s, &sc.env, 130)).into_owned();
+    assert!(plain.contains("Fable  82%"), "{plain}");
+    let plain = strip_ansi(&render(&s, &sc.env, 46)).into_owned();
+    assert!(plain.contains("resets"), "{plain}");
+    assert!(!plain.contains("Fable"), "{plain}");
+}
+
+#[test]
 fn venv_renders_when_env_set() {
     let mut sc = scratch();
     sc.env.venv = Some("py311".to_string());

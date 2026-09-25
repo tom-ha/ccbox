@@ -1,22 +1,14 @@
 //! Property test: every rendered statusline row's visible width equals the
 //! requested width, across an arbitrary session shape × width × density ×
 //! tasks-view.
-//!
-//! NOTE on coverage gap: this test currently exercises **wide** (`>= 80`) and
-//! **narrow** (`< NARROW_WIDTH`) widths only. The **medium** zone
-//! (`NARROW_WIDTH..80`) is a known pre-existing offender: the tokens-cost row
-//! has a fixed-width cluster that overflows the box when the internal width
-//! is below ~68. Fixing that overflow is intentionally out of scope for the
-//! `refine-composable-statusline` change; the property test will be extended
-//! to the medium zone once that bug is addressed.
 
 use proptest::prelude::*;
 
 use ccbox::{
     ansi::strip_ansi,
     config::{Density, Env, TasksView},
-    consts::{MIN_WIDTH, NARROW_WIDTH},
-    input::session::{Model, SessionInfo},
+    consts::{MEDIUM_WIDTH, MIN_WIDTH, NARROW_WIDTH},
+    input::session::{Model, RateBucket, RateLimits, SessionInfo},
     render,
     width::visible_width,
 };
@@ -73,18 +65,31 @@ prop_compose! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 192, ..ProptestConfig::default() })]
 
     #[test]
-    fn wide_zone_every_row_has_requested_visible_width(
-        width in 80u16..=200,
+    fn every_row_has_requested_visible_width(
+        width in prop_oneof![MIN_WIDTH..NARROW_WIDTH, NARROW_WIDTH..MEDIUM_WIDTH, MEDIUM_WIDTH..=200],
         density in arb_density(),
         tasks_view in arb_tasks_view(),
         model in arb_model(),
         cwd in arb_cwd(),
+        limits in proptest::option::of((0.0f64..=120.0, 0.0f64..=120.0, 60i64..600_000)),
     ) {
-        let session = make_session(&model, &cwd, "");
-        let env = env_for(density, tasks_view);
+        let mut session = make_session(&model, &cwd, "");
+        let claude = tempfile::TempDir::new().unwrap();
+        let mut env = env_for(density, tasks_view);
+        if let Some((five, seven, resets_in)) = limits {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            session.rate_limits = RateLimits {
+                five_hour: RateBucket { used_percentage: five, resets_at: now + resets_in % 18_000 },
+                seven_day: RateBucket { used_percentage: seven, resets_at: now + resets_in },
+            };
+            env.claude_dir = claude.path().to_path_buf();
+        }
         let out = render(&session, &env, width);
         prop_assert!(!out.is_empty(), "render returned empty at width {}", width);
         for (idx, line) in out.lines().enumerate() {
@@ -97,29 +102,9 @@ proptest! {
                 idx, vw, want, plain
             );
         }
-    }
-
-    #[test]
-    fn narrow_zone_every_row_has_requested_visible_width(
-        width in MIN_WIDTH..NARROW_WIDTH,
-        density in arb_density(),
-        tasks_view in arb_tasks_view(),
-        model in arb_model(),
-        cwd in arb_cwd(),
-    ) {
-        let session = make_session(&model, &cwd, "");
-        let env = env_for(density, tasks_view);
-        let out = render(&session, &env, width);
-        prop_assert!(!out.is_empty(), "render returned empty at width {}", width);
-        for (idx, line) in out.lines().enumerate() {
-            let vw = visible_width(strip_ansi(line).as_ref());
-            let want = width as usize;
-            let plain = strip_ansi(line).into_owned();
-            prop_assert_eq!(
-                vw, want,
-                "line {} has visible width {}, expected {}; line was {:?}",
-                idx, vw, want, plain
-            );
+        if limits.is_some() {
+            let plain = strip_ansi(&out).into_owned();
+            prop_assert!(plain.contains("session") && plain.contains("week"), "{}", plain);
         }
     }
 }
