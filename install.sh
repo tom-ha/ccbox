@@ -80,7 +80,7 @@ data = json.loads(path.read_text() or "{}")
 prev = data.get("statusLine")
 if prev is not None:
     print(f"==> previous statusLine: {json.dumps(prev)}")
-data["statusLine"] = {"type": "command", "command": ccbox, "refreshInterval": 5}
+data["statusLine"] = {"type": "command", "command": shlex.quote(ccbox), "refreshInterval": 5}
 
 # Hooks feed the "needs you" row. Replace any earlier ccbox hook groups so
 # re-running the installer stays idempotent; other hooks are left alone.
@@ -95,8 +95,11 @@ def is_ccbox_hook(h):
     return len(toks) >= 2 and toks[-1] == "hook" and pathlib.PurePosixPath(toks[-2]).name == "ccbox"
 wanted = {
     "Notification": [""],
+    "PermissionRequest": [""],
+    "PermissionDenied": [""],
     "PreToolUse": ["AskUserQuestion"],
     "PostToolUse": [""],
+    "PostToolUseFailure": [""],
     "UserPromptSubmit": [""],
     "Stop": [""],
     "SessionEnd": [""],
@@ -109,11 +112,15 @@ for event, matchers in wanted.items():
     if not isinstance(existing, list):
         print(f"==> hooks.{event} is not a list; leaving it alone (no ccbox hook added)")
         continue
-    groups = [
-        g for g in existing
-        if not (isinstance(g, dict) and isinstance(g.get("hooks"), list) and g["hooks"]
-                and all(map(is_ccbox_hook, g["hooks"])))
-    ]
+    groups = []
+    for g in existing:
+        inner = g.get("hooks") if isinstance(g, dict) else None
+        if not isinstance(inner, list) or not inner:
+            groups.append(g)
+            continue
+        kept = [h for h in inner if not is_ccbox_hook(h)]
+        if kept:
+            groups.append({**g, "hooks": kept})
     for m in matchers:
         groups.append({"matcher": m, "hooks": [{"type": "command", "command": hook_cmd}]})
     hooks[event] = groups

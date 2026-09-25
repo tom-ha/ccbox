@@ -55,19 +55,31 @@ impl Trend {
     pub fn secs_to_full(&self) -> Option<f64> {
         let t1 = self.now;
         let t0 = (t1 - self.lookback).max(self.start);
-        if t1 - t0 < MIN_SPAN_SECS {
+        // The window's opening 0% is real data only if it's inside the
+        // lookback; interpolating from it otherwise yields the whole-window
+        // average, which is what this avoids.
+        let anchored = t0 <= self.start || self.samples.iter().any(|&(ts, _)| ts < t0);
+        let mut pts: Vec<(f64, f64)> = Vec::new();
+        if anchored {
+            pts.push((t0, self.pct_at(t0)));
+        }
+        pts.extend(
+            self.samples
+                .iter()
+                .copied()
+                .filter(|&(ts, _)| ts >= t0 && ts <= t1),
+        );
+        let span = match (pts.first(), pts.last()) {
+            (Some(a), Some(b)) => b.0 - a.0,
+            _ => 0.0,
+        };
+        if pts.len() < 2 || span < (self.lookback / 6.0).max(MIN_SPAN_SECS) {
             return None;
         }
         let p1 = self.pct_at(t1);
-        let pts: Vec<(f64, f64)> = std::iter::once((t0, self.pct_at(t0)))
-            .chain(
-                self.samples
-                    .iter()
-                    .copied()
-                    .filter(|&(ts, _)| ts > t0 && ts < t1),
-            )
-            .chain(std::iter::once((t1, p1)))
-            .collect();
+        if pts.last().is_some_and(|&(ts, _)| ts < t1) {
+            pts.push((t1, p1));
+        }
         let n = pts.len() as f64;
         let (mt, mp) = pts
             .iter()
@@ -653,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn single_sample_forecasts_from_the_window_average() {
+    fn single_sample_gives_no_forecast() {
         let day = 24.0 * H;
         let t = Trend {
             start: 0.0,
@@ -662,9 +674,24 @@ mod tests {
             samples: vec![(3.4 * day, 81.0)],
             lookback: day,
         };
-        // 81% over 3.4 days leaves 19% at ~23.8%/day ≈ 19.2h.
-        let hours = t.secs_to_full().unwrap() / H;
-        assert!((hours - 19.15).abs() < 0.1, "{hours}");
+        assert_eq!(t.secs_to_full(), None);
+    }
+
+    #[test]
+    fn weekly_needs_hours_of_history_not_minutes() {
+        let day = 24.0 * H;
+        let t = Trend {
+            start: 0.0,
+            end: 7.0 * day,
+            now: 3.4 * day,
+            samples: vec![(3.4 * day - 600.0, 80.0), (3.4 * day, 81.0)],
+            lookback: day,
+        };
+        assert_eq!(
+            t.secs_to_full(),
+            None,
+            "10 min of weekly data is too little"
+        );
     }
 
     #[test]

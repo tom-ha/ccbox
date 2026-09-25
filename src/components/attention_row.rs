@@ -158,6 +158,8 @@ mod tests {
             transcript_path: String::new(),
             agent_id: String::new(),
             tool_use_id: String::new(),
+            tool_key: String::new(),
+            scoped: false,
         }
     }
 

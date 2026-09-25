@@ -86,6 +86,14 @@ fn mtime_secs(path: &Path) -> Option<f64> {
     Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64())
 }
 
+/// A clock that jumped backwards leaves timestamps in the future; treat those
+/// as due rather than waiting for the clock to catch up.
+fn refresh_due(cache_age: f64, attempt: &Attempt, now: f64) -> bool {
+    let cache_due = cache_age >= REFRESH_SECS || cache_age < 0.0;
+    let backoff_over = now - attempt.at >= backoff_secs(attempt.failures) || attempt.at > now;
+    cache_due && backoff_over
+}
+
 /// Refreshes in a detached process so the statusline never waits on it.
 pub fn load(claude_dir: &Path, now: f64) -> Option<AccountUsage> {
     let cached: Option<AccountUsage> = fs::read_to_string(cache_path(claude_dir))
@@ -96,7 +104,7 @@ pub fn load(claude_dir: &Path, now: f64) -> Option<AccountUsage> {
         .map_or(f64::INFINITY, |c| now - c.fetched_at);
     let refreshing = mtime_secs(&lock_path(claude_dir)).is_some_and(|t| now - t < LOCK_STALE_SECS);
     let attempt = read_attempt(claude_dir);
-    let due = age >= REFRESH_SECS && now - attempt.at >= backoff_secs(attempt.failures);
+    let due = refresh_due(age, &attempt, now);
     if due && !refreshing && spawn_refresh() {
         write_attempt(
             claude_dir,
@@ -309,5 +317,25 @@ mod tests {
         assert_eq!(backoff_secs(1), 2.0 * REFRESH_SECS);
         assert_eq!(backoff_secs(3), 8.0 * REFRESH_SECS);
         assert_eq!(backoff_secs(40), MAX_BACKOFF_SECS);
+    }
+
+    #[test]
+    fn refresh_due_respects_backoff_and_clock_skew() {
+        let a = |at, failures| Attempt { at, failures };
+        assert!(
+            refresh_due(f64::INFINITY, &a(0.0, 0), 1_000.0),
+            "no cache yet"
+        );
+        assert!(!refresh_due(10.0, &a(0.0, 0), 1_000.0), "fresh cache");
+        assert!(!refresh_due(400.0, &a(900.0, 2), 1_000.0), "backing off");
+        assert!(refresh_due(400.0, &a(0.0, 2), 1_300.0), "backoff over");
+        assert!(
+            refresh_due(-50.0, &a(0.0, 0), 1_000.0),
+            "cache from the future"
+        );
+        assert!(
+            refresh_due(400.0, &a(5_000.0, 3), 1_000.0),
+            "attempt from the future"
+        );
     }
 }

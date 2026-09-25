@@ -44,6 +44,14 @@ pub struct Marker {
     pub agent_id: String,
     #[serde(default)]
     pub tool_use_id: String,
+    /// Tool name plus input, identifying the call a permission prompt is for.
+    #[serde(default)]
+    pub tool_key: String,
+    /// Set from a hook that names the agent and tool (`PermissionRequest`,
+    /// `PreToolUse`). `Notification` carries neither, so its markers clear on
+    /// any tool completion instead.
+    #[serde(default)]
+    pub scoped: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -64,6 +72,14 @@ pub struct HookInput {
     pub agent_id: String,
     #[serde(default)]
     pub tool_use_id: String,
+    #[serde(default)]
+    pub tool_input: serde_json::Value,
+}
+
+impl HookInput {
+    fn tool_key(&self) -> String {
+        format!("{}:{}", self.tool_name, self.tool_input)
+    }
 }
 
 enum Action {
@@ -75,13 +91,15 @@ enum Action {
 
 fn action(h: &HookInput) -> Action {
     match (h.hook_event_name.as_str(), h.notification_type.as_str()) {
-        ("Notification", "permission_prompt") => Action::Set(Kind::Permission),
+        ("PermissionRequest", _) | ("Notification", "permission_prompt") => {
+            Action::Set(Kind::Permission)
+        }
         ("Notification", "elicitation_dialog" | "elicitation_url_dialog" | "agent_needs_input") => {
             Action::Set(Kind::Question)
         }
         ("Notification", "idle_prompt") => Action::Set(Kind::YourTurn),
         ("PreToolUse", _) if h.tool_name == "AskUserQuestion" => Action::Set(Kind::Question),
-        ("PostToolUse", _) => Action::ToolDone,
+        ("PostToolUse" | "PostToolUseFailure" | "PermissionDenied", _) => Action::ToolDone,
         ("UserPromptSubmit" | "Stop" | "SessionEnd", _) => Action::Clear,
         _ => Action::Ignore,
     }
@@ -137,13 +155,14 @@ fn moved_on(m: &Marker) -> bool {
         return false;
     }
     let len = f.metadata().map(|md| md.len()).unwrap_or(0);
-    let mut tail = String::new();
+    let mut bytes = Vec::new();
     if f.seek(SeekFrom::Start(len.saturating_sub(TAIL_BYTES)))
         .is_err()
-        || f.read_to_string(&mut tail).is_err()
+        || f.read_to_end(&mut bytes).is_err()
     {
         return false;
     }
+    let tail = String::from_utf8_lossy(&bytes);
     tail.lines().rev().any(|ln| {
         let is_turn = ln.contains(r#""type":"user""#) || ln.contains(r#""type":"assistant""#);
         is_turn
@@ -221,8 +240,10 @@ pub fn apply_hook(
         }
         Action::ToolDone => {
             let finishes_marker = read(&path).is_some_and(|m| {
-                m.agent_id == h.agent_id
-                    && (m.tool_use_id.is_empty() || m.tool_use_id == h.tool_use_id)
+                !m.scoped
+                    || (m.agent_id == h.agent_id
+                        && (m.tool_use_id.is_empty() || m.tool_use_id == h.tool_use_id)
+                        && (m.tool_key.is_empty() || m.tool_key == h.tool_key()))
             });
             if finishes_marker {
                 let _ = fs::remove_file(&path);
@@ -230,6 +251,13 @@ pub fn apply_hook(
         }
         Action::Set(kind) => {
             let prev = read(&path);
+            let scoped = matches!(
+                h.hook_event_name.as_str(),
+                "PermissionRequest" | "PreToolUse"
+            );
+            if !scoped && prev.as_ref().is_some_and(|m| m.kind == kind && m.scoped) {
+                return;
+            }
             let since = match &prev {
                 Some(m) if m.kind == kind => m.since,
                 _ => now,
@@ -241,11 +269,9 @@ pub fn apply_hook(
                 pid: owner_pid(),
                 transcript_path: h.transcript_path.clone(),
                 agent_id: h.agent_id.clone(),
-                tool_use_id: if h.hook_event_name == "PreToolUse" {
-                    h.tool_use_id.clone()
-                } else {
-                    String::new()
-                },
+                tool_use_id: h.tool_use_id.clone(),
+                tool_key: if scoped { h.tool_key() } else { String::new() },
+                scoped,
             };
             let _ = fs::create_dir_all(dir(claude_dir));
             if let Ok(body) = serde_json::to_string(&marker) {
@@ -303,6 +329,7 @@ mod tests {
             cwd: "/home/u/api-fix".into(),
             agent_id: String::new(),
             tool_use_id: String::new(),
+            tool_input: serde_json::Value::Null,
         }
     }
 
@@ -481,8 +508,49 @@ mod tests {
         assert!(load_all(d.path(), now).is_empty(), "a later user turn is");
     }
 
+    fn tool(event: &str, name: &str, sid: &str, agent: &str, input: &str) -> HookInput {
+        let mut h = hook(event, "", name, sid);
+        h.agent_id = agent.into();
+        h.tool_input = serde_json::json!({ "command": input });
+        h
+    }
+
     #[test]
-    fn tool_completion_clears_only_its_own_marker() {
+    fn tail_starting_mid_character_still_detects_activity() {
+        use chrono::{TimeZone, Utc};
+        let d = tempdir().unwrap();
+        let t = d.path().join("t.jsonl");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let since = now - 60.0;
+        let ts = Utc
+            .timestamp_opt((since + 30.0) as i64, 0)
+            .unwrap()
+            .to_rfc3339();
+        let mut record = format!("\n{{\"type\":\"user\",\"timestamp\":\"{ts}\"}}\n");
+        let filler = "é".repeat(40_000);
+        let tail_start = filler.len() + record.len() - 64 * 1024;
+        if tail_start % 2 == 0 {
+            record.insert(0, ' ');
+        }
+        fs::write(&t, format!("{filler}{record}")).unwrap();
+        let len = fs::metadata(&t).unwrap().len() as usize;
+        assert_eq!(
+            fs::read(&t).unwrap()[len - 64 * 1024] & 0xC0,
+            0x80,
+            "tail starts mid-char"
+        );
+
+        let mut h = hook("Notification", "permission_prompt", "", "s1");
+        h.transcript_path = t.to_string_lossy().into();
+        apply_hook(d.path(), &h, since, || None);
+        assert!(load_all(d.path(), now).is_empty());
+    }
+
+    #[test]
+    fn question_clears_only_on_its_own_tool_call() {
         let d = tempdir().unwrap();
         let mut ask = hook("PreToolUse", "", "AskUserQuestion", "s1");
         ask.tool_use_id = "toolu_ask".into();
@@ -493,28 +561,106 @@ mod tests {
         apply_hook(d.path(), &other, 11.0, || None);
         assert_eq!(load_all(d.path(), 12.0).len(), 1, "parallel tool finishing");
 
-        let mut sub = hook("Notification", "permission_prompt", "", "s2");
-        sub.agent_id = "agent-1".into();
-        apply_hook(d.path(), &sub, 10.0, || None);
+        let mut answered = hook("PostToolUse", "", "AskUserQuestion", "s1");
+        answered.tool_use_id = "toolu_ask".into();
+        apply_hook(d.path(), &answered, 13.0, || None);
+        assert!(load_all(d.path(), 14.0).is_empty());
+    }
+
+    #[test]
+    fn subagent_permission_prompt_clears_on_its_own_completion() {
+        // Real payloads: PermissionRequest and PostToolUse carry agent_id;
+        // Notification carries none.
+        let d = tempdir().unwrap();
         apply_hook(
             d.path(),
-            &hook("PostToolUse", "", "Bash", "s2"),
+            &tool("PermissionRequest", "Bash", "s1", "agent-1", "rm x"),
+            10.0,
+            || None,
+        );
+        apply_hook(
+            d.path(),
+            &hook("Notification", "permission_prompt", "", "s1"),
+            10.5,
+            || None,
+        );
+        let m = &load_all(d.path(), 11.0)[0].1;
+        assert!(
+            m.scoped,
+            "Notification must not downgrade the scoped marker"
+        );
+
+        apply_hook(
+            d.path(),
+            &tool("PostToolUse", "Bash", "s1", "", "ls"),
             11.0,
+            || None,
+        );
+        apply_hook(
+            d.path(),
+            &tool("PostToolUse", "Bash", "s1", "agent-1", "ls"),
+            11.5,
             || None,
         );
         assert_eq!(
             load_all(d.path(), 12.0).len(),
-            2,
-            "main thread tool vs subagent prompt"
+            1,
+            "other calls leave it alone"
         );
 
-        let mut answered = hook("PostToolUse", "", "AskUserQuestion", "s1");
-        answered.tool_use_id = "toolu_ask".into();
-        apply_hook(d.path(), &answered, 13.0, || None);
-        let mut sub_done = hook("PostToolUse", "", "Bash", "s2");
-        sub_done.agent_id = "agent-1".into();
-        apply_hook(d.path(), &sub_done, 13.0, || None);
-        assert!(load_all(d.path(), 14.0).is_empty());
+        apply_hook(
+            d.path(),
+            &tool("PostToolUse", "Bash", "s1", "agent-1", "rm x"),
+            13.0,
+            || None,
+        );
+        assert!(
+            load_all(d.path(), 14.0).is_empty(),
+            "approved call clears it"
+        );
+    }
+
+    #[test]
+    fn denied_or_failed_permission_clears() {
+        let d = tempdir().unwrap();
+        for (i, done) in ["PermissionDenied", "PostToolUseFailure"]
+            .into_iter()
+            .enumerate()
+        {
+            let sid = format!("s{i}");
+            apply_hook(
+                d.path(),
+                &tool("PermissionRequest", "Bash", &sid, "", "rm x"),
+                10.0,
+                || None,
+            );
+            apply_hook(
+                d.path(),
+                &tool(done, "Bash", &sid, "", "rm x"),
+                11.0,
+                || None,
+            );
+        }
+        assert!(load_all(d.path(), 12.0).is_empty());
+    }
+
+    #[test]
+    fn notification_only_marker_clears_on_any_tool_completion() {
+        let d = tempdir().unwrap();
+        apply_hook(
+            d.path(),
+            &hook("Notification", "permission_prompt", "", "s1"),
+            10.0,
+            || None,
+        );
+        assert!(!load_all(d.path(), 11.0)[0].1.scoped);
+        apply_hook(
+            d.path(),
+            &tool("PostToolUse", "Bash", "s1", "agent-9", "ls"),
+            12.0,
+            || None,
+        );
+        assert!(load_all(d.path(), 13.0).is_empty());
     }
 
     #[test]

@@ -33,7 +33,11 @@ data = json.loads(path.read_text() or "{}")
 sl = data.get("statusLine")
 cmd = sl.get("command") if isinstance(sl, dict) else None
 changed = False
-if cmd and pathlib.PurePosixPath(cmd).name == "ccbox":
+try:
+    cmd_toks = shlex.split(cmd) if cmd else []
+except ValueError:
+    cmd_toks = []
+if cmd_toks and pathlib.PurePosixPath(cmd_toks[0]).name == "ccbox":
     data.pop("statusLine", None)
     changed = True
     print(f"==> removed statusLine.command ({cmd}) from {path}")
