@@ -4,8 +4,7 @@
 //! accessor fetches its datum at most once per render and reuses the
 //! memoized value on subsequent calls.
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::cell::Cell;
 
 use chrono::{Local, TimeZone};
 use once_cell::unsync::OnceCell;
@@ -18,10 +17,11 @@ use crate::data::git_info::GitInfo;
 use crate::data::loaded_skills::LoadedSkills;
 use crate::data::openspec::OpenSpec;
 use crate::data::running_subagents::RunningSubagents;
-use crate::data::subscription_marker;
+use crate::data::account_usage::{self, AccountUsage};
+use crate::data::waiting::{self, Marker};
+use crate::data::{session_name, subscription_marker};
 use crate::data::task_list::TaskList;
 use crate::data::token_log::TokenLog;
-use crate::data::token_rate::{TokenRate, WINDOW};
 use crate::data::transcript_usage::TranscriptUsage;
 use crate::data::user_messages::last_user_prompt_ts;
 
@@ -29,23 +29,23 @@ use super::context::ComponentContext;
 
 /// Lazy data cache. Each accessor fetches its datum at most once per
 /// render; subsequent calls reuse the memoized value. Subscription-marker
-/// touches and token-log/rate writes happen on first access only.
+/// touches and token-log writes happen on first access only.
 #[derive(Default)]
 pub struct RenderCache {
     transcript_usage: OnceCell<TranscriptUsage>,
     token_log: OnceCell<TokenLog>,
-    token_rate: OnceCell<u64>,
     git_info: OnceCell<GitInfo>,
     task_list: OnceCell<TaskList>,
     last_prompt_ts: OnceCell<f64>,
     running_subagents: OnceCell<RunningSubagents>,
     openspec: OnceCell<OpenSpec>,
     loaded_skills: OnceCell<LoadedSkills>,
+    session_name: OnceCell<Option<String>>,
+    waiting: OnceCell<Vec<(String, Marker)>>,
+    account_usage: OnceCell<Option<AccountUsage>>,
     session_cost: Cell<Option<f64>>,
     day_cost: Cell<Option<f64>>,
-    tokens_recently_active: Cell<Option<(bool, bool)>>,
     show_cost: Cell<Option<bool>>,
-    spark_history: RefCell<HashMap<usize, Vec<i32>>>,
 }
 
 impl RenderCache {
@@ -77,19 +77,6 @@ impl RenderCache {
             let _ = self.token_log.set(log);
         }
         self.token_log.get().unwrap()
-    }
-
-    pub fn token_rate(&self, ctx: &ComponentContext) -> u64 {
-        *self.token_rate.get_or_init(|| {
-            let usage = *self.transcript_usage(ctx);
-            TokenRate::update(
-                &ctx.env.claude_dir,
-                &ctx.session.session_id,
-                usage.billed_in(),
-                usage.output_tokens,
-                ctx.now,
-            )
-        })
     }
 
     pub fn git_info(&self, ctx: &ComponentContext) -> &GitInfo {
@@ -138,6 +125,28 @@ impl RenderCache {
             .get_or_init(|| LoadedSkills::from_transcript(&ctx.session.transcript_path))
     }
 
+    pub fn session_name(&self, ctx: &ComponentContext) -> Option<&str> {
+        self.session_name
+            .get_or_init(|| session_name::from_transcript(&ctx.session.transcript_path))
+            .as_deref()
+    }
+
+    pub fn waiting(&self, ctx: &ComponentContext) -> &[(String, Marker)] {
+        self.waiting
+            .get_or_init(|| waiting::load_all(&ctx.env.claude_dir, ctx.now))
+    }
+
+    pub fn account_usage(&self, ctx: &ComponentContext) -> Option<&AccountUsage> {
+        self.account_usage
+            .get_or_init(|| {
+                if ctx.session.rate_limits.five_hour.resets_at == 0 {
+                    return None;
+                }
+                account_usage::load(&ctx.env.claude_dir, ctx.now)
+            })
+            .as_ref()
+    }
+
     pub fn session_cost(&self, ctx: &ComponentContext) -> f64 {
         if let Some(v) = self.session_cost.get() {
             return v;
@@ -171,16 +180,6 @@ impl RenderCache {
         v
     }
 
-    pub fn tokens_recently_active(&self, ctx: &ComponentContext) -> (bool, bool) {
-        if let Some(v) = self.tokens_recently_active.get() {
-            return v;
-        }
-        let v =
-            TokenRate::recently_active(&ctx.env.claude_dir, &ctx.session.session_id, ctx.now, 10.0);
-        self.tokens_recently_active.set(Some(v));
-        v
-    }
-
     /// Whether the cost cluster should render. Cached so repeated reads stay
     /// idempotent (subscription marker touch happens on first call).
     pub fn show_cost(&self, ctx: &ComponentContext) -> bool {
@@ -197,22 +196,6 @@ impl RenderCache {
             marker_exists,
         );
         self.show_cost.set(Some(v));
-        v
-    }
-
-    /// Sparkline history sized for `bar_w` buckets. Memoized per `bar_w`.
-    pub fn token_rate_history(&self, ctx: &ComponentContext, bar_w: usize) -> Vec<i32> {
-        if let Some(v) = self.spark_history.borrow().get(&bar_w) {
-            return v.clone();
-        }
-        let v = TokenRate::history(
-            &ctx.env.claude_dir,
-            &ctx.session.session_id,
-            bar_w,
-            WINDOW * 2.0,
-            ctx.now,
-        );
-        self.spark_history.borrow_mut().insert(bar_w, v.clone());
         v
     }
 }

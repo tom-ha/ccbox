@@ -3,24 +3,12 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::consts::{AUTOCOMPACT_RATIO, SOFT_LIMIT};
+use crate::consts::AUTOCOMPACT_RATIO;
 use crate::glyphs::{bar, BOLD, RESET};
 use crate::input::session::ContextWindow;
 use crate::render::format::fmt_tok;
 use crate::render::Renderer;
 use crate::width::visible_width;
-
-/// Effective soft limit (auto-compact threshold) for the percentage and bar
-/// shown in the context line. Scales with the session's reported
-/// `context_window_size` so 1M-context users get a meaningful number; falls
-/// back to the legacy 150K constant when the window size is unknown.
-pub fn effective_soft_limit(context_window_size: u64) -> u64 {
-    if context_window_size == 0 {
-        SOFT_LIMIT
-    } else {
-        (context_window_size as f64 * AUTOCOMPACT_RATIO).floor() as u64
-    }
-}
 
 static EMPTY_FADE_256: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[38;5;(\d+)m").unwrap());
 static EMPTY_FADE_RGB: Lazy<Regex> =
@@ -100,12 +88,11 @@ impl Renderer {
 
     /// Full-width context line: `ctx  <tokens> of <window> (<pct>%)  <bar>`.
     pub fn context_line(&self, ctx: &ContextWindow, available: i32) -> String {
-        let total_tokens = ctx.total_input_tokens + ctx.total_output_tokens;
-        let limit = effective_soft_limit(ctx.context_window_size);
-        let fill_ratio = ((total_tokens as f64) / (limit as f64)).min(1.0);
-        let pct = ((total_tokens as f64) / (limit as f64) * 100.0).clamp(0.0, 100.0);
+        let total_tokens = ctx.used_tokens();
+        let pct = ctx.used_pct().unwrap_or(0.0);
+        let fill_ratio = pct / 100.0;
         let t = self.theme;
-        let clr = self.risk_zone_color_for_ratio(fill_ratio);
+        let clr = self.risk_zone_color_for_ratio(fill_ratio / AUTOCOMPACT_RATIO);
 
         let window_label = if ctx.context_window_size > 0 {
             fmt_tok(ctx.context_window_size)
@@ -129,12 +116,11 @@ impl Renderer {
 
     /// Compact context line for narrow layouts: `ctx <tokens>/<window> <pct>% <bar>`.
     pub fn context_line_compact(&self, ctx: &ContextWindow, available: i32) -> String {
-        let total_tokens = ctx.total_input_tokens + ctx.total_output_tokens;
-        let limit = effective_soft_limit(ctx.context_window_size);
-        let fill_ratio = ((total_tokens as f64) / (limit as f64)).min(1.0);
-        let pct = ((total_tokens as f64) / (limit as f64) * 100.0).clamp(0.0, 100.0);
+        let total_tokens = ctx.used_tokens();
+        let pct = ctx.used_pct().unwrap_or(0.0);
+        let fill_ratio = pct / 100.0;
         let t = self.theme;
-        let clr = self.risk_zone_color_for_ratio(fill_ratio);
+        let clr = self.risk_zone_color_for_ratio(fill_ratio / AUTOCOMPACT_RATIO);
 
         let window_label = if ctx.context_window_size > 0 {
             fmt_tok(ctx.context_window_size)
@@ -202,7 +188,7 @@ mod tests {
     fn context_line_contains_token_count() {
         let r = Renderer::default();
         let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 50_000;
+        ctx.current_usage.cache_read_input_tokens = 50_000;
         ctx.context_window_size = 200_000;
         let s = r.context_line(&ctx, 76);
         let plain = crate::ansi::strip_ansi(&s);
@@ -213,7 +199,7 @@ mod tests {
     fn context_line_uses_of_word_and_window() {
         let r = Renderer::default();
         let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 120_000;
+        ctx.current_usage.cache_read_input_tokens = 120_000;
         ctx.context_window_size = 200_000;
         let s = r.context_line(&ctx, 100);
         let plain = crate::ansi::strip_ansi(&s);
@@ -222,14 +208,14 @@ mod tests {
             plain.contains("120.0K of 200.0K"),
             "expected 'X of Y' form: {plain}"
         );
-        assert!(plain.contains("(80%)"), "expected (pct%) form: {plain}");
+        assert!(plain.contains("(60%)"), "expected (pct%) form: {plain}");
     }
 
     #[test]
     fn context_line_unknown_window_renders_question_mark() {
         let r = Renderer::default();
         let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 75_000;
+        ctx.current_usage.cache_read_input_tokens = 75_000;
         ctx.context_window_size = 0;
         let s = r.context_line(&ctx, 100);
         let plain = crate::ansi::strip_ansi(&s);
@@ -245,7 +231,7 @@ mod tests {
         // secondary "% against window". The new design has only one.
         let r = Renderer::default();
         let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 50_000;
+        ctx.current_usage.cache_read_input_tokens = 50_000;
         ctx.context_window_size = 200_000;
         let s = r.context_line(&ctx, 100);
         let plain = crate::ansi::strip_ansi(&s);
@@ -258,7 +244,7 @@ mod tests {
     fn context_line_compact_uses_slash_form() {
         let r = Renderer::default();
         let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 30_000;
+        ctx.current_usage.cache_read_input_tokens = 30_000;
         ctx.context_window_size = 200_000;
         let s = r.context_line_compact(&ctx, 40);
         let plain = crate::ansi::strip_ansi(&s);
@@ -276,7 +262,7 @@ mod tests {
     fn context_line_compact_includes_pct() {
         let r = Renderer::default();
         let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 30_000;
+        ctx.current_usage.cache_read_input_tokens = 30_000;
         let s = r.context_line_compact(&ctx, 30);
         let plain = crate::ansi::strip_ansi(&s);
         assert!(plain.contains("%"), "{plain}");
@@ -291,7 +277,7 @@ mod tests {
         for &available in &[60i32, 80, 100, 137, 200] {
             for &total in &[0u64, 1_000, 75_000, 120_000, 160_000, 200_000, 500_000] {
                 let mut ctx = ContextWindow::default();
-                ctx.total_input_tokens = total;
+                ctx.current_usage.cache_read_input_tokens = total;
                 ctx.context_window_size = 200_000;
                 let s = r.context_line(&ctx, available);
                 assert_eq!(
@@ -309,7 +295,7 @@ mod tests {
         for &available in &[30i32, 40, 55, 80] {
             for &total in &[0u64, 1_000, 75_000, 120_000, 160_000, 200_000] {
                 let mut ctx = ContextWindow::default();
-                ctx.total_input_tokens = total;
+                ctx.current_usage.cache_read_input_tokens = total;
                 ctx.context_window_size = 200_000;
                 let s = r.context_line_compact(&ctx, available);
                 assert_eq!(
@@ -321,72 +307,71 @@ mod tests {
         }
     }
 
-    #[test]
-    fn effective_limit_200k_matches_legacy_soft_limit() {
-        assert_eq!(effective_soft_limit(200_000), 150_000);
+    fn plain_line(ctx: &ContextWindow) -> String {
+        crate::ansi::strip_ansi(&Renderer::default().context_line(ctx, 100)).into_owned()
     }
 
     #[test]
-    fn effective_limit_1m_scales_to_750k() {
-        assert_eq!(effective_soft_limit(1_000_000), 750_000);
-    }
-
-    #[test]
-    fn effective_limit_zero_falls_back() {
-        assert_eq!(effective_soft_limit(0), SOFT_LIMIT);
-    }
-
-    #[test]
-    fn context_line_200k_75k_renders_50_percent() {
-        let r = Renderer::default();
+    fn context_line_1m_700k_renders_70_percent() {
         let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 75_000;
+        ctx.current_usage.cache_read_input_tokens = 700_000;
+        ctx.context_window_size = 1_000_000;
+        let plain = plain_line(&ctx);
+        assert!(plain.contains("700.0K of 1.0M (70%)"), "{plain}");
+    }
+
+    #[test]
+    fn context_line_sums_all_input_kinds() {
+        let mut ctx = ContextWindow::default();
+        ctx.current_usage.input_tokens = 3;
+        ctx.current_usage.cache_creation_input_tokens = 17;
+        ctx.current_usage.cache_read_input_tokens = 16_476;
+        ctx.current_usage.output_tokens = 999;
         ctx.context_window_size = 200_000;
-        let s = r.context_line(&ctx, 100);
-        let plain = crate::ansi::strip_ansi(&s);
-        assert!(plain.contains("50%"), "expected 50% at 75K/200K: {plain}");
+        let plain = plain_line(&ctx);
+        assert!(plain.contains("16.5K of 200.0K (8%)"), "{plain}");
     }
 
     #[test]
-    fn context_line_1m_150k_renders_20_percent() {
+    fn context_line_ignores_cumulative_session_totals() {
+        let mut ctx = ContextWindow {
+            total_input_tokens: 5_000_000,
+            total_output_tokens: 400_000,
+            context_window_size: 200_000,
+            ..Default::default()
+        };
+        ctx.current_usage.cache_read_input_tokens = 50_000;
+        let plain = plain_line(&ctx);
+        assert!(plain.contains("50.0K of 200.0K (25%)"), "{plain}");
+    }
+
+    #[test]
+    fn context_line_prefers_reported_used_percentage() {
+        let mut ctx = ContextWindow::default();
+        ctx.current_usage.cache_read_input_tokens = 50_000;
+        ctx.context_window_size = 200_000;
+        ctx.used_percentage = Some(31.0);
+        let plain = plain_line(&ctx);
+        assert!(plain.contains("(31%)"), "{plain}");
+    }
+
+    #[test]
+    fn context_line_unknown_window_renders_zero_percent() {
+        let mut ctx = ContextWindow::default();
+        ctx.current_usage.cache_read_input_tokens = 75_000;
+        let plain = plain_line(&ctx);
+        assert!(plain.contains("75.0K of ? (0%)"), "{plain}");
+    }
+
+    #[test]
+    fn context_line_near_autocompact_uses_warn_or_alert() {
         let r = Renderer::default();
         let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 150_000;
+        ctx.current_usage.cache_read_input_tokens = 700_000;
         ctx.context_window_size = 1_000_000;
         let s = r.context_line(&ctx, 100);
-        let plain = crate::ansi::strip_ansi(&s);
         assert!(
-            plain.contains("20%"),
-            "expected 20% at 150K/1M (limit 750K): {plain}"
-        );
-    }
-
-    #[test]
-    fn context_line_unknown_window_uses_legacy_fallback() {
-        let r = Renderer::default();
-        let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 75_000;
-        ctx.context_window_size = 0;
-        let s = r.context_line(&ctx, 100);
-        let plain = crate::ansi::strip_ansi(&s);
-        assert!(
-            plain.contains("50%"),
-            "expected 50% at 75K with no window (fallback 150K): {plain}"
-        );
-    }
-
-    #[test]
-    fn context_line_1m_near_alert_uses_warn_or_alert() {
-        // 700K / 750K ≈ 93% — past the warn threshold (53%) and into warn/alert.
-        let r = Renderer::default();
-        let mut ctx = ContextWindow::default();
-        ctx.total_input_tokens = 700_000;
-        ctx.context_window_size = 1_000_000;
-        let s = r.context_line(&ctx, 100);
-        let warn = r.theme.warn;
-        let alert = r.theme.alert;
-        assert!(
-            s.contains(warn) || s.contains(alert),
+            s.contains(r.theme.warn) || s.contains(r.theme.alert),
             "expected warn/alert colour at 700K/1M, got: {s:?}"
         );
     }

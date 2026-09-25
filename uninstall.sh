@@ -27,21 +27,66 @@ if [[ -f "$SETTINGS" ]]; then
   echo "==> backed up existing settings to $BACKUP"
 
   python3 - "$SETTINGS" <<'PY'
-import json, sys, pathlib
+import json, shlex, sys, pathlib
 path = pathlib.Path(sys.argv[1])
 data = json.loads(path.read_text() or "{}")
 sl = data.get("statusLine")
 cmd = sl.get("command") if isinstance(sl, dict) else None
-if cmd and pathlib.PurePosixPath(cmd).name == "ccbox":
+changed = False
+try:
+    cmd_toks = shlex.split(cmd) if cmd else []
+except ValueError:
+    cmd_toks = []
+if cmd_toks and pathlib.PurePosixPath(cmd_toks[0]).name == "ccbox":
     data.pop("statusLine", None)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    tmp.replace(path)
+    changed = True
     print(f"==> removed statusLine.command ({cmd}) from {path}")
 elif cmd:
     print(f"==> statusLine.command is {cmd!r}, not ccbox — leaving it alone")
 else:
     print(f"==> no statusLine entry in {path} — nothing to unwire")
+
+def is_ccbox_hook(h):
+    if not isinstance(h, dict):
+        return False
+    try:
+        toks = shlex.split(str(h.get("command", "")))
+    except ValueError:
+        return False
+    return len(toks) >= 2 and toks[-1] == "hook" and pathlib.PurePosixPath(toks[-2]).name == "ccbox"
+
+hooks = data.get("hooks")
+if isinstance(hooks, dict):
+    removed = 0
+    for event in list(hooks):
+        if not isinstance(hooks[event], list):
+            continue
+        kept_groups = []
+        event_removed = 0
+        for g in hooks[event]:
+            inner = g.get("hooks") if isinstance(g, dict) else None
+            if not isinstance(inner, list):
+                kept_groups.append(g)
+                continue
+            kept = [h for h in inner if not is_ccbox_hook(h)]
+            event_removed += len(inner) - len(kept)
+            if kept or not inner:
+                kept_groups.append({**g, "hooks": kept})
+        removed += event_removed
+        if kept_groups:
+            hooks[event] = kept_groups
+        elif event_removed:
+            del hooks[event]
+    if not hooks:
+        data.pop("hooks")
+    if removed:
+        changed = True
+        print(f"==> removed {removed} ccbox hook(s) from {path}")
+
+if changed:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(path)
 PY
 else
   echo "==> $SETTINGS does not exist — nothing to unwire"

@@ -28,9 +28,9 @@ impl Renderer {
     /// Render the git branch chip: `<glyph> <branch>` plus optional markers.
     ///
     /// Markers (right of the branch name, in order):
-    /// - `±` (dirty colour) when the working tree is dirty.
-    /// - `↑N` (commit-colour) when ahead of upstream.
-    /// - `↓N` (warn colour) when behind upstream.
+    /// - `N changed` (dirty colour) when the working tree is dirty.
+    /// - `N ahead` (commit-colour) when ahead of upstream.
+    /// - `N behind` (warn colour) when behind upstream.
     ///
     /// Uses a file-tree glyph when the repo is a worktree (or submodule)
     /// instead of the branch glyph. Returns `("", 0)` when there is no
@@ -40,7 +40,7 @@ impl Renderer {
             return (String::new(), 0);
         }
         let t = self.theme;
-        let dirty = git.modified > 0 || git.untracked > 0 || git.deleted > 0 || git.renamed > 0;
+        let changed = git.modified + git.untracked + git.deleted + git.renamed;
         let glyph = if git.worktree {
             GLYPH_GIT_WORKTREE
         } else {
@@ -51,14 +51,14 @@ impl Renderer {
             "{}{glyph}{RESET} {}{}{RESET}",
             t.branch, t.branch, git.branch,
         );
-        if dirty {
-            text.push_str(&format!(" {}±{RESET}", t.dirty));
+        if changed > 0 {
+            text.push_str(&format!(" {}{changed} changed{RESET}", t.dirty));
         }
         if git.ahead > 0 {
-            text.push_str(&format!(" {}↑{}{RESET}", t.commit, git.ahead));
+            text.push_str(&format!(" {}{} ahead{RESET}", t.commit, git.ahead));
         }
         if git.behind > 0 {
-            text.push_str(&format!(" {}↓{}{RESET}", t.warn, git.behind));
+            text.push_str(&format!(" {}{} behind{RESET}", t.warn, git.behind));
         }
         let w = visible_width(&text);
         (text, w)
@@ -167,19 +167,19 @@ mod tests {
             "missing branch glyph: {plain}"
         );
         assert!(plain.contains("main"), "missing branch name: {plain}");
-        assert!(!plain.contains("±"));
+        assert!(!plain.contains("changed"));
         assert_eq!(w, visible_width(&text));
     }
 
     #[test]
-    fn branch_chip_dirty_appends_dot() {
+    fn branch_chip_dirty_appends_changed_count() {
         let r = Renderer::default();
         let mut g = git("main");
         g.modified = 1;
         let (text, _w) = r.branch_chip(&g);
         let plain = crate::ansi::strip_ansi(&text);
         assert!(plain.contains(GLYPH_GIT_BRANCH));
-        assert!(plain.contains("main ±"), "{plain}");
+        assert!(plain.contains("main 1 changed"), "{plain}");
     }
 
     #[test]
@@ -189,7 +189,7 @@ mod tests {
         g.untracked = 2;
         let (text, _w) = r.branch_chip(&g);
         let plain = crate::ansi::strip_ansi(&text);
-        assert!(plain.contains("±"), "{plain}");
+        assert!(plain.contains("2 changed"), "{plain}");
     }
 
     #[test]
@@ -234,9 +234,9 @@ mod tests {
         g.ahead = 2;
         let (text, _w) = r.branch_chip(&g);
         let plain = crate::ansi::strip_ansi(&text);
-        assert!(plain.contains("↑2"), "{plain}");
-        assert!(!plain.contains("↓"), "{plain}");
-        assert!(!plain.contains("±"), "{plain}");
+        assert!(plain.contains("2 ahead"), "{plain}");
+        assert!(!plain.contains(" behind"), "{plain}");
+        assert!(!plain.contains("changed"), "{plain}");
     }
 
     #[test]
@@ -246,8 +246,8 @@ mod tests {
         g.behind = 3;
         let (text, _w) = r.branch_chip(&g);
         let plain = crate::ansi::strip_ansi(&text);
-        assert!(plain.contains("↓3"), "{plain}");
-        assert!(!plain.contains("↑"), "{plain}");
+        assert!(plain.contains("3 behind"), "{plain}");
+        assert!(!plain.contains(" ahead"), "{plain}");
     }
 
     #[test]
@@ -258,8 +258,8 @@ mod tests {
         g.behind = 1;
         let (text, _w) = r.branch_chip(&g);
         let plain = crate::ansi::strip_ansi(&text);
-        assert!(plain.contains("↑2"), "{plain}");
-        assert!(plain.contains("↓1"), "{plain}");
+        assert!(plain.contains("2 ahead"), "{plain}");
+        assert!(plain.contains("1 behind"), "{plain}");
     }
 
     #[test]
@@ -271,9 +271,9 @@ mod tests {
         g.behind = 1;
         let (text, _w) = r.branch_chip(&g);
         let plain = crate::ansi::strip_ansi(&text);
-        assert!(plain.contains("±"), "{plain}");
-        assert!(plain.contains("↑2"), "{plain}");
-        assert!(plain.contains("↓1"), "{plain}");
+        assert!(plain.contains("1 changed"), "{plain}");
+        assert!(plain.contains("2 ahead"), "{plain}");
+        assert!(plain.contains("1 behind"), "{plain}");
     }
 
     #[test]
@@ -281,7 +281,7 @@ mod tests {
         let r = Renderer::default();
         let (text, _w) = r.branch_chip(&git("main"));
         let plain = crate::ansi::strip_ansi(&text);
-        assert!(!plain.contains("↑"));
-        assert!(!plain.contains("↓"));
+        assert!(!plain.contains(" ahead"));
+        assert!(!plain.contains(" behind"));
     }
 }

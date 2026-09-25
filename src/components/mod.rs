@@ -5,8 +5,9 @@
 //! | id                 | shown at densities             | notes                       |
 //! |--------------------|--------------------------------|-----------------------------|
 //! | `top-header`       | always                         | path/branch/venv/model row  |
+//! | `attention-row`    | always, when a session waits   | needs-you badge + others    |
 //! | `context-row`      | always                         | context-line / compact form |
-//! | `tokens-cost-row`  | always (medium/wide only)      | tokens/cost/rate/sparkline  |
+//! | `tokens-cost-row`  | always (medium/wide only)      | tokens/cost/usage limits    |
 //! | `tasks-row`        | Standard, Verbose              | inline or board kanban      |
 //! | `subagents-row`    | Standard, Verbose              | live subagent transcripts   |
 //! | `openspec-row`     | Standard, Verbose              | openspec progress bars      |
@@ -16,6 +17,7 @@
 //! All built-in components are zero-sized; the registry stores
 //! `&'static dyn Component` references to long-lived `static` instances.
 
+pub mod attention_row;
 pub mod component;
 pub mod composition;
 pub mod context;

@@ -61,7 +61,6 @@ pub fn build_snapshot(session: &SessionInfo, env: &Env, width: i32, r: &Renderer
         },
         "session_cost_usd": data.session_cost(&ctx),
         "day_cost_usd": data.day_cost(&ctx),
-        "tokens_per_minute": data.token_rate(&ctx),
         "fill_ratio": fill_ratio(session),
     });
 

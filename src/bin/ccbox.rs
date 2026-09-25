@@ -5,8 +5,8 @@ use std::process::ExitCode;
 
 use ccbox::{
     config::{
-        parse_bool_tristate, parse_density, parse_tasks_view, resolve_row_visibility, Density,
-        Env, RowVisibilitySource, TasksView,
+        parse_bool_tristate, parse_density, parse_tasks_view, resolve_row_visibility, Density, Env,
+        RowVisibilitySource, TasksView,
     },
     consts::{DEFAULT_MAX_WIDTH, MIN_WIDTH},
     input::session::SessionInfo,
@@ -39,6 +39,17 @@ fn read_venv_name() -> Option<String> {
 
 fn main() -> ExitCode {
     let raw_args: Vec<String> = env::args().skip(1).collect();
+    if matches!(raw_args.first().map(String::as_str), Some("usage-refresh")) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        ccbox::data::account_usage::refresh(&resolve_claude_dir(), now);
+        return ExitCode::SUCCESS;
+    }
+    if matches!(raw_args.first().map(String::as_str), Some("hook")) {
+        return run_hook();
+    }
     if matches!(raw_args.first().map(String::as_str), Some("toggle")) {
         return run_toggle(&raw_args[1..]);
     }
@@ -173,6 +184,26 @@ fn parse_bg(v: &str, fallback: BgShift) -> BgShift {
     }
 }
 
+/// Always exits 0 so a hook can never block or fail the session it runs in.
+fn run_hook() -> ExitCode {
+    use std::io::Read;
+    let mut raw = String::new();
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    if let Ok(input) = serde_json::from_str::<ccbox::data::waiting::HookInput>(&raw) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        ccbox::data::waiting::apply_hook(
+            &resolve_claude_dir(),
+            &input,
+            now,
+            ccbox::data::waiting::owner_pid,
+        );
+    }
+    ExitCode::SUCCESS
+}
+
 /// Resolve the Claude config directory the way `main()` does, so the
 /// `toggle` subcommand reads/writes the same `ccbox-toggles.json` the
 /// statusline renders against.
@@ -208,7 +239,14 @@ fn run_toggle(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("show") => apply_set(&claude_dir, current, args.get(1), Some(true)),
         Some("hide") => apply_set(&claude_dir, current, args.get(1), Some(false)),
-        Some("flip") => apply_flip(&claude_dir, current, args.get(1), env_tasks, env_subs, density),
+        Some("flip") => apply_flip(
+            &claude_dir,
+            current,
+            args.get(1),
+            env_tasks,
+            env_subs,
+            density,
+        ),
         Some("status") => print_status(&current, env_tasks, env_subs, density),
         Some(other) => {
             eprintln!("ccbox toggle: unknown subcommand: {other}");
@@ -446,8 +484,7 @@ mod toggle_tests {
         let dir = tempdir().unwrap();
         let current = toggles::load(dir.path());
         // Minimal density: includes_tasks() == false → effective=false → flip writes true.
-        let effective_minimal =
-            effective_value(&current, Row::Tasks, None, None, Density::Minimal);
+        let effective_minimal = effective_value(&current, Row::Tasks, None, None, Density::Minimal);
         assert!(!effective_minimal);
         // Standard density: includes_tasks() == true → effective=true → flip writes false.
         let effective_standard =

@@ -73,18 +73,62 @@ else
 fi
 
 python3 - "$SETTINGS" "$CCBOX_BIN" <<'PY'
-import json, sys, pathlib
+import json, shlex, sys, pathlib
 path = pathlib.Path(sys.argv[1])
 ccbox = sys.argv[2]
 data = json.loads(path.read_text() or "{}")
 prev = data.get("statusLine")
 if prev is not None:
     print(f"==> previous statusLine: {json.dumps(prev)}")
-data["statusLine"] = {"type": "command", "command": ccbox}
+data["statusLine"] = {"type": "command", "command": shlex.quote(ccbox), "refreshInterval": 5}
+
+# Hooks feed the "needs you" row. Replace any earlier ccbox hook groups so
+# re-running the installer stays idempotent; other hooks are left alone.
+hook_cmd = f"{shlex.quote(ccbox)} hook"
+def is_ccbox_hook(h):
+    if not isinstance(h, dict):
+        return False
+    try:
+        toks = shlex.split(str(h.get("command", "")))
+    except ValueError:
+        return False
+    return len(toks) >= 2 and toks[-1] == "hook" and pathlib.PurePosixPath(toks[-2]).name == "ccbox"
+wanted = {
+    "Notification": [""],
+    "PermissionRequest": [""],
+    "PermissionDenied": [""],
+    "PreToolUse": ["AskUserQuestion"],
+    "PostToolUse": [""],
+    "PostToolUseFailure": [""],
+    "UserPromptSubmit": [""],
+    "Stop": [""],
+    "SubagentStop": [""],
+    "SessionEnd": [""],
+}
+hooks = data.setdefault("hooks", {})
+if not isinstance(hooks, dict):
+    sys.exit(f"==> settings.json 'hooks' is not an object; not touching it")
+for event, matchers in wanted.items():
+    existing = hooks.get(event, [])
+    if not isinstance(existing, list):
+        print(f"==> hooks.{event} is not a list; leaving it alone (no ccbox hook added)")
+        continue
+    groups = []
+    for g in existing:
+        inner = g.get("hooks") if isinstance(g, dict) else None
+        if not isinstance(inner, list) or not inner:
+            groups.append(g)
+            continue
+        kept = [h for h in inner if not is_ccbox_hook(h)]
+        if kept:
+            groups.append({**g, "hooks": kept})
+    for m in matchers:
+        groups.append({"matcher": m, "hooks": [{"type": "command", "command": hook_cmd}]})
+    hooks[event] = groups
 tmp = path.with_suffix(path.suffix + ".tmp")
 tmp.write_text(json.dumps(data, indent=2) + "\n")
 tmp.replace(path)
 PY
 
-echo "==> wrote statusLine.command = $CCBOX_BIN to $SETTINGS"
+echo "==> wrote statusLine.command = $CCBOX_BIN and ccbox hooks to $SETTINGS"
 echo "Done. Restart Claude Code to pick up the new statusline."

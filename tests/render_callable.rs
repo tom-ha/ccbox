@@ -266,20 +266,20 @@ fn ccbox_show_subagents_independent_of_tasks() {
 }
 
 #[test]
-fn tokens_row_has_augmented_labels() {
+fn tokens_row_shows_limits_for_subscriptions_and_tokens_for_api() {
     let mut sc = scratch();
-    // Force cost visible so the tokens row renders with the cost cluster.
     sc.env.show_cost_override = Some(true);
-    let s = render(&fixture(), &sc.env, 130);
-    let plain = strip_ansi(&s);
+    let plain = strip_ansi(&render(&fixture(), &sc.env, 130)).into_owned();
     assert!(
-        plain.contains(" in "),
-        "expected augmented 'in' label: {plain}"
+        plain.contains("session"),
+        "subscription shows limits: {plain}"
     );
-    assert!(
-        plain.contains(" out "),
-        "expected augmented 'out' label: {plain}"
-    );
+    assert!(!plain.contains("↓ in"), "limits replace tokens: {plain}");
+
+    let mut api = fixture();
+    api.rate_limits = Default::default();
+    let plain = strip_ansi(&render(&api, &sc.env, 130)).into_owned();
+    assert!(plain.contains(" in ") && plain.contains(" out "), "{plain}");
 }
 
 #[test]
@@ -391,4 +391,40 @@ fn populated_rate_limits_writes_marker() {
         marker.exists(),
         "render with populated rate_limits should touch marker"
     );
+}
+
+#[test]
+fn needs_you_row_keeps_every_line_the_same_width() {
+    use ccbox::data::waiting::{apply_hook, HookInput};
+    let sc = scratch();
+    let s = fixture();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    for (sid, kind) in [
+        (s.session_id.as_str(), "permission_prompt"),
+        ("other-1", "idle_prompt"),
+    ] {
+        let input: HookInput = serde_json::from_value(serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": kind,
+            "session_id": sid,
+            "cwd": "/home/u/api-fix",
+        }))
+        .unwrap();
+        apply_hook(&sc.env.claude_dir, &input, now, || None);
+    }
+    for width in [44, 60, 80, 100, 140] {
+        let out = render(&s, &sc.env, width);
+        assert!(strip_ansi(&out).contains("NEEDS YOU"), "{width}");
+        for (i, line) in out.lines().enumerate() {
+            assert_eq!(
+                visible_width(line),
+                width as usize,
+                "w={width} line {i}: {:?}",
+                strip_ansi(line)
+            );
+        }
+    }
 }
