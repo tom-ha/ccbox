@@ -7,6 +7,11 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
 
 ## [Unreleased]
 
+### Fixed
+
+- `install.sh` gives up on a downloaded binary that does not answer
+  `ccbox version` within 10 s, instead of waiting on it forever.
+
 ## [0.6.0] - 2026-09-27
 
 ### Added

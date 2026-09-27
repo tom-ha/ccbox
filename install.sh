@@ -76,6 +76,23 @@ find_prebuilt() {
   [[ -n "$SUMS_URL" ]] || return 3
 }
 
+probe_version() {
+  local bin="$1" out="$2" pid i
+  "$bin" version > "$out" 2>/dev/null &
+  pid=$!
+  for i in $(seq 1 100); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 1
+  fi
+  wait "$pid" 2>/dev/null
+  cat "$out"
+}
+
 install_prebuilt() {
   local tmp expected actual
   tmp="$(mktemp -d)"
@@ -102,9 +119,9 @@ install_prebuilt() {
     err "could not write $BIN_DIR/ccbox; set CCBOX_BIN_DIR to a directory you can write to"
     return 1
   fi
-  if [[ "$("$staged" version 2>/dev/null)" != "ccbox ${RELEASE_TAG#v}" ]]; then
+  if [[ "$(probe_version "$staged" "$tmp/version")" != "ccbox ${RELEASE_TAG#v}" ]]; then
     rm -f "$staged"
-    err "the ccbox in $TAR_NAME does not run here or does not report ccbox ${RELEASE_TAG#v}; not installing"
+    err "the ccbox in $TAR_NAME does not run here or does not report ccbox ${RELEASE_TAG#v} within 10 s; not installing"
     return 1
   fi
   if ! mv -f "$staged" "$BIN_DIR/ccbox"; then
