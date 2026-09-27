@@ -19,6 +19,12 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
   session-ID prefix, and each entry reads as a sentence:
   `api-fix asked for permission 1m ago · another session finished 6m ago`.
 
+### Fixed
+
+- The week's reset time shows on the week. When a per-model limit such as
+  `Fable` reset at the same time, the time appeared only after that limit, so
+  the week looked like it had none.
+
 ## [0.6.0] - 2026-09-27
 
 ### Added
