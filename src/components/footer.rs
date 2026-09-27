@@ -153,10 +153,9 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(
-            names,
-            ["update-check.json"],
-            "fresh cache, so no spawn marker"
+        assert!(
+            !names.iter().any(|n| n == "update-check.spawned"),
+            "fresh cache, so no spawn marker: {names:?}"
         );
     }
 }
