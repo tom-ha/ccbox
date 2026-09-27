@@ -79,6 +79,7 @@ pub struct Env {
     /// Same shape as [`Env::show_tasks_override`], for the subagents row.
     /// Populated from `CCBOX_SHOW_SUBAGENTS` at startup.
     pub show_subagents_override: Option<bool>,
+    pub show_waiting_override: Option<bool>,
     /// Per-row toggles loaded from `<claude_dir>/ccbox-toggles.json`. Takes
     /// precedence over the env-var overrides above; see [`resolve_row_visibility`].
     pub toggles: Toggles,
@@ -112,6 +113,10 @@ pub fn resolve_row_visibility(
     } else {
         (None, RowVisibilitySource::Density)
     }
+}
+
+pub fn waiting_row_enabled(state: Option<bool>, env_var: Option<bool>) -> bool {
+    resolve_row_visibility(state, env_var).0.unwrap_or(false)
 }
 
 /// Parse a tri-state boolean env-var value.
@@ -343,6 +348,14 @@ mod tests {
             resolve_row_visibility(None, None),
             (None, RowVisibilitySource::Density),
         );
+    }
+
+    #[test]
+    fn waiting_row_is_off_unless_turned_on() {
+        assert!(!waiting_row_enabled(None, None));
+        assert!(waiting_row_enabled(None, Some(true)));
+        assert!(waiting_row_enabled(Some(true), Some(false)));
+        assert!(!waiting_row_enabled(Some(false), Some(true)));
     }
 
     #[test]

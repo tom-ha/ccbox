@@ -30,7 +30,7 @@ A fast, Rust statusline for [Claude Code](https://claude.com/claude-code) — dr
 curl -fsSL https://raw.githubusercontent.com/tom-ha/ccbox/main/install.sh | bash
 ```
 
-This downloads the prebuilt binary for your platform from the [latest release](https://github.com/tom-ha/ccbox/releases/latest), checks its SHA-256 against the release's `SHA256SUMS`, and installs it as `~/.cargo/bin/ccbox`. A checksum mismatch stops the install. With no prebuilt binary for your platform, or no release yet, it builds from source with `cargo install` instead (about a minute). Then the installed binary patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline (refreshing every 5s) and calls ccbox's hook for the "needs you" row. Re-running it is safe; other hooks are left alone, and `settings.json` is only rewritten, after a backup to `settings.json.bak.YYYYMMDD-HHMMSS`, when something changes. Restart Claude Code afterwards.
+This downloads the prebuilt binary for your platform from the [latest release](https://github.com/tom-ha/ccbox/releases/latest), checks its SHA-256 against the release's `SHA256SUMS`, and installs it as `~/.cargo/bin/ccbox`. A checksum mismatch stops the install. With no prebuilt binary for your platform, or no release yet, it builds from source with `cargo install` instead (about a minute). Then the installed binary patches `~/.claude/settings.json` so Claude Code invokes `ccbox` as its statusline (refreshing every 5s) and calls ccbox's hook for the waiting row, which is off until you turn it on. Re-running it is safe; other hooks are left alone, and `settings.json` is only rewritten, after a backup to `settings.json.bak.YYYYMMDD-HHMMSS`, when something changes. Restart Claude Code afterwards.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -147,20 +147,22 @@ export CCBOX_DENSITY=minimal  # quietest
 export CCBOX_DENSITY=verbose  # show everything you've got
 ```
 
-For finer-grained control over just the tasks or subagents row — including a `/ccbox` slash command that toggles without restarting Claude Code — see **Per-row toggles** below.
+For finer-grained control over just the tasks, subagents or waiting row — including a `/ccbox` slash command that toggles without restarting Claude Code — see **Per-row toggles** below.
 
 ### Per-row toggles
 
-The density preset above is all-or-nothing across the four event-driven rows. When you want to hide *just* the tasks row or *just* the subagents row, use these per-row controls instead.
+The density preset above is all-or-nothing across the four event-driven rows. When you want to hide *just* the tasks row or *just* the subagents row, use these per-row controls instead. They are also how you turn on the waiting row, which no density preset shows.
 
 | Variable | Default | What it does |
 |---|---|---|
 | `CCBOX_SHOW_TASKS` | unset | `1`/`true`/`yes`/`on` forces the tasks row visible (even under `CCBOX_DENSITY=minimal`). `0`/`false`/`no`/`off` hides it (even under `standard`/`verbose`). Unset = fall through to the density preset. |
 | `CCBOX_SHOW_SUBAGENTS` | unset | Same shape, for the subagents row. |
+| `CCBOX_SHOW_WAITING` | unset | `1`/`true`/`yes`/`on` shows the waiting row (see **Reading the rows**). Unset = off. |
 
 ```bash
 export CCBOX_SHOW_TASKS=0      # always hide the tasks row
 export CCBOX_SHOW_SUBAGENTS=1  # always show subagents (when present)
+export CCBOX_SHOW_WAITING=1    # list sessions that are waiting on you
 ```
 
 #### Runtime toggle without a restart
@@ -169,9 +171,9 @@ Env vars only take effect on the next Claude Code launch. For live toggling, ccb
 
 | Path | Shape |
 |---|---|
-| `<claude_dir>/ccbox-toggles.json` | `{ "show_tasks": false, "show_subagents": true }` |
+| `<claude_dir>/ccbox-toggles.json` | `{ "show_tasks": false, "show_subagents": true, "show_waiting": true }` |
 
-Both keys are optional. Missing file, empty file, malformed JSON, and permission errors are all treated as "no overrides" silently — no warning, no panic. The file is written atomically (tempfile + rename), so concurrent processes never observe a half-written file.
+Every key is optional. Missing file, empty file, malformed JSON, and permission errors are all treated as "no overrides" silently — no warning, no panic. The file is written atomically (tempfile + rename), so concurrent processes never observe a half-written file.
 
 The `/ccbox` slash command (shipped with the plugin, mirrored under this repo's `.claude/commands/ccbox.md`) edits the file for you:
 
@@ -179,6 +181,7 @@ The `/ccbox` slash command (shipped with the plugin, mirrored under this repo's 
 /ccbox show tasks         # force tasks row visible
 /ccbox hide subagents     # force subagents row hidden
 /ccbox flip tasks         # invert current effective visibility
+/ccbox show waiting       # turn on the waiting row
 /ccbox status             # report each row's current visibility and source
 ```
 
@@ -188,6 +191,7 @@ The slash command runs `ccbox` with the same arguments, so the commands work dir
 ccbox show tasks
 ccbox hide subagents
 ccbox flip tasks
+ccbox show waiting
 ccbox status
 ```
 
@@ -197,6 +201,7 @@ ccbox status
 row         visible  source
 tasks       false    state_file
 subagents   true     env
+waiting     false    default
 
 installed     0.6.0
 latest        0.6.0 (checked 2026-10-01 09:12)
@@ -205,11 +210,11 @@ update check  on
 
 #### Precedence
 
-For each of the tasks and subagents rows, visibility resolves in this order — the first layer with an opinion wins:
+For each of the tasks, subagents and waiting rows, visibility resolves in this order — the first layer with an opinion wins:
 
 1. **State file** (`<claude_dir>/ccbox-toggles.json`) — the most recent / most interactive signal.
-2. **Env var** (`CCBOX_SHOW_TASKS` / `CCBOX_SHOW_SUBAGENTS`) — the persistent baseline.
-3. **Density preset** (`CCBOX_DENSITY`) — the broad default.
+2. **Env var** (`CCBOX_SHOW_TASKS` / `CCBOX_SHOW_SUBAGENTS` / `CCBOX_SHOW_WAITING`) — the persistent baseline.
+3. **Density preset** (`CCBOX_DENSITY`) — the broad default. For the waiting row this layer is always off (`status` reports it as `default`).
 
 Then AND with content presence — a row is never rendered when its content is empty, regardless of overrides.
 
@@ -273,7 +278,7 @@ The cache is per-cwd (FNV1a-hashed for a stable, filesystem-safe filename) and i
 
 - **Top border** — session ID and time since the session last wrote to its transcript.
 - **Top row** — working directory, git branch with `N changed` (uncommitted files), `N ahead` / `N behind` (commits vs. upstream), and the model with its reasoning effort.
-- **Needs you** — appears only while a session is waiting on you. This session shows a `⏸ NEEDS YOU` badge with what it's waiting for (`permission`, `question`, `your turn`) and for how long; every other waiting session on the machine is listed after it, so any terminal tells you which one is stuck. Driven by Claude Code hooks that ccbox registers when it is installed or updated: ccbox's hook runs on `PermissionRequest`, `Notification`, and `PreToolUse` for `AskUserQuestion` to mark a session, and on `PostToolUse` / `PostToolUseFailure` / `PermissionDenied` / `SubagentStop` / `UserPromptSubmit` / `Stop` / `SessionEnd` to clear it. Each agent gets its own marker, so parallel subagents waiting at once are tracked separately, and a background subagent's prompt survives the main turn ending. When a session has several, the row shows a blocking prompt ahead of "your turn". A permission marker clears when that same call finishes or fails, or when the agent that asked moves on in its own transcript — which is also how a rejected prompt clears, since Claude Code fires no hook for a rejection. Entries clear themselves when the session's Claude Code process exits, when its transcript shows it has moved on, or — for `your turn`, shown dim because nothing is blocked — after 10 minutes; `permission` and `question` stay until answered. Claude Code hides the statusline during a permission prompt, so that session's own badge isn't visible then — the other terminals still show it.
+- **Waiting** — off by default; `ccbox show waiting` or `CCBOX_SHOW_WAITING=1` turns it on. It appears only while a session is waiting on you. This session shows a `⏸ NEEDS YOU` badge with what it's waiting for (`⏸ NEEDS YOU  asked for permission 1m ago`), or a dim `⏸ finished 3m ago, your turn`. Every other waiting session on the machine is listed after it, one sentence each (`api-fix asked a question 2m ago · another session finished 6m ago`), so any terminal tells you which one is stuck. A session is named by its `/rename` title; one that was never renamed shows as "another session". Driven by Claude Code hooks that ccbox registers when it is installed or updated: ccbox's hook runs on `PermissionRequest`, `Notification`, and `PreToolUse` for `AskUserQuestion` to mark a session, and on `PostToolUse` / `PostToolUseFailure` / `PermissionDenied` / `SubagentStop` / `UserPromptSubmit` / `Stop` / `SessionEnd` to clear it. Each agent gets its own marker, so parallel subagents waiting at once are tracked separately, and a background subagent's prompt survives the main turn ending. When a session has several, the row shows a blocking prompt ahead of "your turn". A permission marker clears when that same call finishes or fails, or when the agent that asked moves on in its own transcript — which is also how a rejected prompt clears, since Claude Code fires no hook for a rejection. Entries clear themselves when the session's Claude Code process exits, when its transcript shows it has moved on, or — for `your turn`, shown dim because nothing is blocked — after 10 minutes; `permission` and `question` stay until answered. Claude Code hides the statusline during a permission prompt, so that session's own badge isn't visible then — the other terminals still show it. While the row is off, the hook exits without recording anything, so sessions that were already waiting when you turn it on show up at their next prompt.
 - **Bottom border** — `⬆ ccbox <version> available · run ccbox update` when a newer release is out; see **Updating**.
 - **ctx** — tokens currently in the context window, out of the model's window size, and the percentage of the full window used (Claude Code's own `used_percentage`). The colour turns warn/alert as you approach auto-compaction (~75% of the window).
 - **Limits** — on Pro/Max subscriptions: the `session` (5-hour) and `week` (7-day) usage limits, plus per-model weekly limits such as `Fable` with their reset time (`resets 9:30am` within 24 hours — Claude Code's `/usage` threshold — else `resets Mon 12pm`). Each bar fills to the usage %, and a `│` marker shows where usage would be if you spread it evenly over the window. Fill past the marker (usage ahead of that even pace) is drawn red (`▓`). Usage is account-wide (all sessions, plus claude.ai); the marker is purely time. If your current rate would hit the limit before it resets, a red `maxed at ~Fri 1:15pm` forecast appears when the row has room — from a line fitted through usage samples (logged by every session on this machine) over the last 30 minutes for the session limit and the last 24 hours for weekly limits, so nights and breaks count toward the weekly rate. The forecast stays hidden until there's enough real history: samples spanning at least 5 minutes for the session limit and 4 hours for weekly limits. A limit turns warn at 70%, when it's forecast to run out before reset, or when you're more than 10 points ahead of an even pace; it turns alert at 90%. Once a limit hits 100% and you continue on extra usage, an extra-usage cell appears. If the account data below isn't available, it falls back to an estimate (`~$X`): the list-price cost of everything since the limit was hit, summed across sessions until that window resets. Per-model limits and real extra-usage spend aren't in Claude Code's statusline data, so ccbox asks Claude Code for them: every 5 minutes at most, in the background, it runs `claude -p` with the SDK `get_usage` request — no prompt is sent, so no usage is consumed, and user settings are skipped so none of your hooks run and no transcript is saved. Results are cached in `<claude_dir>/ccbox-cache/account-usage.json` and shared by all sessions. With that data, the extra-usage cell shows your actual spend (`extra usage $130.96 of $500.00`) instead of the estimate. When the row can't fit everything, it adds items in this order and stops at the first that doesn't fit: the session usage % (always shown), the week %, the session's reset time and forecast, the extra-usage cell, the week's reset time and forecast, the `$ sess · $ today` cost cell if it's shown, and per-model limits. When the session or week limit is at 100%, its reset time moves up to right after the percentages, since that's when extra billing stops (the later one first if both are). Bars take whatever room is left. On API billing there are no limits, so the row shows input/output tokens and the `$ sess · $ today` cost cell instead.
@@ -283,7 +288,7 @@ The cache is per-cwd (FNV1a-hashed for a stable, filesystem-safe filename) and i
 ```
 Usage:
   ccbox [--theme NAME] [--width COLS] [--full-width] [--bg-shift warm|cool] [--snapshot]
-  ccbox show|hide|flip tasks|subagents
+  ccbox show|hide|flip tasks|subagents|waiting
   ccbox status
   ccbox update [--check] [--version X.Y.Z] [--force]
   ccbox version

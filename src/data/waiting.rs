@@ -21,21 +21,12 @@ pub enum Kind {
     YourTurn,
 }
 
-impl Kind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Kind::Permission => "permission",
-            Kind::Question => "question",
-            Kind::YourTurn => "your turn",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Marker {
     pub kind: Kind,
     pub since: f64,
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub pid: Option<u32>,
     #[serde(default)]
@@ -66,8 +57,6 @@ pub struct HookInput {
     pub tool_name: String,
     #[serde(default)]
     pub transcript_path: String,
-    #[serde(default)]
-    pub cwd: String,
     #[serde(default)]
     pub agent_id: String,
     #[serde(default)]
@@ -161,22 +150,6 @@ fn write_marker(claude_dir: &Path, path: &Path, marker: &Marker) {
         if fs::write(&tmp, body).is_ok() {
             let _ = fs::rename(&tmp, path);
         }
-    }
-}
-
-fn display_name(h: &HookInput) -> String {
-    if let Some(n) = session_name::from_transcript(&h.transcript_path) {
-        return n;
-    }
-    let base = Path::new(&h.cwd)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let short: String = h.session_id.chars().take(8).collect();
-    if base.is_empty() {
-        short
-    } else {
-        format!("{base} {short}")
     }
 }
 
@@ -408,7 +381,7 @@ pub fn apply_hook(
             let marker = Marker {
                 kind,
                 since,
-                name: display_name(h),
+                name: session_name::from_transcript(&h.transcript_path),
                 pid: owner_pid(),
                 transcript_path: h.transcript_path.clone(),
                 agent_id: agent.to_string(),
@@ -469,7 +442,6 @@ mod tests {
             notification_type: notif.into(),
             tool_name: tool.into(),
             transcript_path: String::new(),
-            cwd: "/home/u/api-fix".into(),
             agent_id: String::new(),
             tool_use_id: String::new(),
             tool_input: serde_json::Value::Null,
@@ -489,7 +461,7 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].0, "s1");
         assert_eq!(all[0].1.kind, Kind::Permission);
-        assert_eq!(all[0].1.name, "api-fix s1");
+        assert_eq!(all[0].1.name, None, "a session never renamed has no name");
 
         apply_hook(
             d.path(),

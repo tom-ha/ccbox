@@ -141,6 +141,21 @@ fn snapshot_env_row_visibility_defaults_to_density() {
 }
 
 #[test]
+fn snapshot_waiting_row_is_off_by_default() {
+    let raw = run_snapshot("140", &[]);
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let rv = &v["env"]["row_visibility"]["waiting"];
+    assert_eq!(rv["visible"], false);
+    assert_eq!(rv["source"], "default");
+
+    let raw = run_snapshot("140", &[("CCBOX_SHOW_WAITING", "1")]);
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let rv = &v["env"]["row_visibility"]["waiting"];
+    assert_eq!(rv["visible"], true);
+    assert_eq!(rv["source"], "env");
+}
+
+#[test]
 fn snapshot_env_row_visibility_reports_env_source() {
     let raw = run_snapshot("140", &[("CCBOX_SHOW_TASKS", "0")]);
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
