@@ -105,6 +105,8 @@ pub struct RowSpec {
     /// Empty for plain separators. Honoured by Separator / SeparatorDim /
     /// SeparatorSeam rows only.
     pub left_chip: String,
+    /// Right-anchored chip candidates, longest first, for a BottomBorder row.
+    pub right_chips: Vec<String>,
 }
 
 impl Default for RowSpec {
@@ -121,6 +123,7 @@ impl Default for RowSpec {
             pill_edge: Edge::Bottom,
             right_pill: String::new(),
             left_chip: String::new(),
+            right_chips: Vec::new(),
         }
     }
 }
@@ -187,7 +190,7 @@ pub fn render_layout(spec: &LayoutSpec, r: &Renderer) -> Vec<String> {
                 row.pill.as_ref(),
             )),
             RowKind::BottomBorder => {
-                out.push(border.border_bottom(spec.width, &row.ups, spec.fill))
+                out.push(border.border_bottom(spec.width, &row.ups, spec.fill, &row.right_chips))
             }
             RowKind::Separator | RowKind::SeparatorSeam => {
                 out.push(border.border_separator(spec.width, &row.ups, spec.fill, &row.left_chip))

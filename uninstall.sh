@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Remove ccbox: unwire it from Claude Code's statusLine, delete ccbox's
-# files under <claude_dir>, and uninstall the binary via cargo.
-# Requires: python3 (used to patch settings.json). cargo is only required
-# if the binary is still installed.
+# files under <claude_dir>, and remove the binary: via cargo when cargo
+# installed it, and from $CCBOX_BIN_DIR (default ~/.cargo/bin) otherwise.
+# Requires: python3 (used to patch settings.json).
 #
 # Works both when run from a local checkout (./uninstall.sh) and when
 # piped from curl (curl -fsSL <raw-url> | bash).
@@ -105,19 +105,27 @@ if [[ -d "$CACHE_DIR" ]]; then
   echo "==> removed $CACHE_DIR"
 fi
 
-# Step 3: uninstall the binary. `cargo uninstall` is the inverse of the
-# `cargo install` used by install.sh. We swallow failures so the script
-# stays useful when cargo isn't on PATH or the package isn't installed.
-CCBOX_BIN="$(command -v ccbox || true)"
-if command -v cargo >/dev/null 2>&1; then
+# Step 3: remove the binary: cargo's record for a source build, the file for a prebuilt one.
+if [[ -n "${CCBOX_BIN_DIR:-}" ]]; then
+  echo "==> CCBOX_BIN_DIR is set — leaving cargo's install root alone"
+elif command -v cargo >/dev/null 2>&1; then
   if cargo uninstall ccbox 2>/dev/null; then
     echo "==> uninstalled ccbox via cargo"
   else
     echo "==> cargo uninstall ccbox reported nothing to remove"
   fi
 else
-  echo "==> cargo not found in PATH — skipping binary uninstall"
+  echo "==> cargo not found in PATH — skipping cargo uninstall"
 fi
+
+BIN_DIR="${CCBOX_BIN_DIR:-${CARGO_HOME:-$HOME/.cargo}/bin}"
+if [[ -f "$BIN_DIR/ccbox" ]]; then
+  rm -f "$BIN_DIR/ccbox"
+  echo "==> removed $BIN_DIR/ccbox"
+fi
+for leftover in "$BIN_DIR"/.ccbox-update-*.tmp "$BIN_DIR"/.ccbox-install.*; do
+  [[ -f "$leftover" ]] && rm -f "$leftover" && echo "==> removed $leftover"
+done
 
 # If the binary is still resolvable (e.g. installed outside cargo, or a
 # stale entry remained), surface it so the user can clean it up.

@@ -10,7 +10,8 @@ use crate::components::{compose, ComponentContext, Composition, RenderCache};
 use crate::config::{resolve_row_visibility, Density, Env, RowVisibilitySource, TasksView};
 use crate::consts::{MEDIUM_WIDTH, MIN_WIDTH, NARROW_WIDTH};
 use crate::input::session::SessionInfo;
-use crate::layout::fill_ratio;
+use crate::layout::{fill_ratio, RowKind};
+use crate::render::border::pick_bottom_chip;
 use crate::render::Renderer;
 use crate::theme::Theme;
 
@@ -41,7 +42,7 @@ pub fn build_snapshot(session: &SessionInfo, env: &Env, width: i32, r: &Renderer
     let data = RenderCache::new();
     let ctx = ComponentContext::new(session, env, r, width, now, &data);
     // Drive compose() so the cache gets populated identically to a real render.
-    let _spec = compose(&comp, &ctx);
+    let spec = compose(&comp, &ctx);
 
     let body: Vec<Value> = comp
         .body
@@ -64,6 +65,23 @@ pub fn build_snapshot(session: &SessionInfo, env: &Env, width: i32, r: &Renderer
         "fill_ratio": fill_ratio(session),
     });
 
+    let check = data.update_check(&ctx);
+    let chip = spec
+        .rows
+        .iter()
+        .find(|row| row.kind == RowKind::BottomBorder)
+        .and_then(|row| pick_bottom_chip(width, &row.ups, &row.right_chips))
+        .map(|c| strip_ansi(c).trim().to_string());
+    let update = json!({
+        "installed": crate::release::VERSION,
+        "check_enabled": env.update_check,
+        "latest": check.and_then(|c| c.latest.clone()),
+        "checked_at": check.map(|c| c.checked_at).filter(|t| *t > 0.0),
+        "failures": check.map(|c| c.failures),
+        "chip_visible": chip.is_some(),
+        "chip": chip,
+    });
+
     json!({
         "session": session,
         "env": env_json(env),
@@ -72,6 +90,7 @@ pub fn build_snapshot(session: &SessionInfo, env: &Env, width: i32, r: &Renderer
         "layout": layout_name,
         "composition": { "body": body },
         "computed": computed,
+        "update": update,
     })
 }
 
@@ -93,6 +112,7 @@ fn env_json(env: &Env) -> Value {
         "density": density_str(env.density),
         "tasks_view": tasks_view_str(env.tasks_view),
         "git_cache_ttl_ms": env.git_cache_ttl_ms,
+        "update_check": env.update_check,
     })
 }
 

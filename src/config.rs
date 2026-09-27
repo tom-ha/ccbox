@@ -92,6 +92,8 @@ pub struct Env {
     /// TTL in milliseconds for the on-disk `GitInfo` cache (`0` disables).
     /// Populated from `CCBOX_GIT_CACHE_TTL_MS`; default `2000`.
     pub git_cache_ttl_ms: u64,
+    /// `false` when `CCBOX_UPDATE_CHECK` is falsy: no update-check spawn, network call or chip.
+    pub update_check: bool,
 }
 
 /// Resolve a row's effective override using the precedence chain

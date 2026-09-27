@@ -181,7 +181,7 @@ fn display_name(h: &HookInput) -> String {
 }
 
 fn owner_alive(m: &Marker) -> bool {
-    m.pid.map_or(true, process_alive)
+    m.pid.is_none_or(process_alive)
 }
 
 /// Hooks always report the main transcript, but a subagent writes to
