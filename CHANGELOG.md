@@ -41,6 +41,11 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
   or backs up `settings.json` when nothing changes. `CCBOX_BIN_DIR` sets the
   install directory.
 - `uninstall.sh` also removes a prebuilt binary that cargo did not install.
+- The limits row fills in a fixed priority order as the terminal narrows:
+  session usage always shows (now also below 55 columns on subscriptions),
+  then week usage, then reset times and forecasts, extra usage, cost and
+  per-model limits. An exhausted limit's reset time moves up next to the
+  percentages. This fixes a blank limits row at 55–62 columns on extra usage.
 - `ccbox --help` lists the commands and the new variables, keeps its table
   indentation, and names the real built-in themes.
 - The minimum Rust version for source builds is 1.85.
