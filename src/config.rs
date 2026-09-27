@@ -91,7 +91,7 @@ pub struct Env {
     /// Board (default) or inline kanban for the task row.
     pub tasks_view: TasksView,
     /// TTL in milliseconds for the on-disk `GitInfo` cache (`0` disables).
-    /// Populated from `CCBOX_GIT_CACHE_TTL_MS`; default `2000`.
+    /// Populated from `CCBOX_GIT_CACHE_TTL_MS`; default `10000`.
     pub git_cache_ttl_ms: u64,
     /// `false` when `CCBOX_UPDATE_CHECK` is falsy: no update-check spawn, network call or chip.
     pub update_check: bool,

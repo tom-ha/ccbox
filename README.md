@@ -266,11 +266,11 @@ If neither is set, no venv slot is rendered. Activate the venv **before** starti
 
 ### Git cache
 
-`GitInfo` (branch, ahead/behind, dirty markers) is shelled out to `git` on each render. To absorb the high frequency of statusline calls during streaming responses, results are cached on disk under `<claude_dir>/ccbox-cache/git/<hash>.json`.
+`GitInfo` (branch, ahead/behind, dirty markers) comes from running `git`, which costs tens of milliseconds. Results are cached on disk under `<claude_dir>/ccbox-cache/git/<hash>.json` for 10 seconds, longer than Claude Code's 5-second redraw, so an idle statusline runs git at most every 10 seconds instead of on every redraw. The trade-off: after a commit, checkout or edit, the branch and changed-file count can lag by up to that long.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CCBOX_GIT_CACHE_TTL_MS` | `2000` | TTL in milliseconds for the cache. `0` disables caching. Stale or missing entries trigger a live read and a refresh of the cache file. |
+| `CCBOX_GIT_CACHE_TTL_MS` | `10000` | TTL in milliseconds for the cache. `0` disables caching. Stale or missing entries trigger a live read and a refresh of the cache file. |
 
 The cache is per-cwd (FNV1a-hashed for a stable, filesystem-safe filename) and is refreshed atomically via a tempfile + rename, so concurrent ccbox processes don't clobber each other's entries.
 

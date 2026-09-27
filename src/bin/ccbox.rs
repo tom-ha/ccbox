@@ -136,7 +136,7 @@ fn main() -> ExitCode {
     let git_cache_ttl_ms: u64 = env::var("CCBOX_GIT_CACHE_TTL_MS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(2000);
+        .unwrap_or(10_000);
     let venv = read_venv_name();
     let env_struct = Env {
         claude_dir: claude_dir.clone(),
@@ -775,7 +775,7 @@ Environment variables:
                         ~100 columns) or as a single inline kanban.
   CCBOX_GIT_CACHE_TTL_MS
                         TTL in milliseconds for the on-disk GitInfo cache under
-                        <claude_dir>/ccbox-cache/git/ (default 2000; 0 disables
+                        <claude_dir>/ccbox-cache/git/ (default 10000; 0 disables
                         caching).
   CCBOX_UPDATE_CHECK    0/false/no/off turns off the daily background check for
                         a new release and the notice on the bottom border;
