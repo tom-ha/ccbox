@@ -7,6 +7,8 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-27
+
 ### Added
 
 - Tagged releases: pushing a `vX.Y.Z` tag builds prebuilt `ccbox` binaries for
