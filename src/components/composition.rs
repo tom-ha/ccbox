@@ -25,9 +25,10 @@ pub struct Composition<'a> {
 
 impl Composition<'static> {
     /// Composition for `width < NARROW_WIDTH`: subagents (if any) above the
-    /// compact context line.
+    /// compact context line and the usage limits.
     pub fn narrow() -> Self {
-        static BODY: &[&dyn Component] = &[&ATTENTION_ROW, &SUBAGENTS_ROW, &CONTEXT_ROW];
+        static BODY: &[&dyn Component] =
+            &[&ATTENTION_ROW, &SUBAGENTS_ROW, &CONTEXT_ROW, &TOKENS_COST_ROW];
         Self {
             header: &TOP_HEADER,
             body: BODY,
