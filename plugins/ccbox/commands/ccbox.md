@@ -1,6 +1,6 @@
 ---
 name: "ccbox"
-description: "Toggle ccbox tasks/subagents rows at runtime (no restart). Subcommands: show|hide|flip <tasks|subagents>, status."
+description: "Toggle ccbox tasks/subagents/waiting rows at runtime (no restart). Subcommands: show|hide|flip <tasks|subagents|waiting>, status."
 category: Statusline
 tags: [ccbox, statusline, toggles]
 ---
@@ -13,9 +13,10 @@ Run `ccbox` with the given arguments and relay its output to the user.
 - `/ccbox hide tasks` — force the tasks row hidden
 - `/ccbox flip tasks` — invert the current effective visibility of the tasks row
 - `/ccbox show subagents` / `hide subagents` / `flip subagents` — same, for subagents
-- `/ccbox status` — print the resolved visibility and source (state_file / env / density) for each gated row, then the installed version and the latest known release
+- `/ccbox show waiting` / `hide waiting` / `flip waiting` — same, for the row listing sessions that are waiting on you (off until shown)
+- `/ccbox status` — print the resolved visibility and source (state_file / env / density / default) for each gated row, then the installed version and the latest known release
 
-The state file at `<claude_dir>/ccbox-toggles.json` takes precedence over `CCBOX_SHOW_TASKS` / `CCBOX_SHOW_SUBAGENTS`, which take precedence over `CCBOX_DENSITY`. The next statusline render reflects the new state — no Claude Code restart required.
+The state file at `<claude_dir>/ccbox-toggles.json` takes precedence over `CCBOX_SHOW_TASKS` / `CCBOX_SHOW_SUBAGENTS` / `CCBOX_SHOW_WAITING`, which take precedence over `CCBOX_DENSITY` (the waiting row is off in every density). The next statusline render reflects the new state — no Claude Code restart required.
 
 ## Steps
 
