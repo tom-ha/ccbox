@@ -7,6 +7,8 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-27
+
 ### Changed
 
 - The waiting ("needs you") row is off by default. `ccbox show waiting` or
