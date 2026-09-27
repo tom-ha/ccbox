@@ -2,13 +2,11 @@
 //! from the main transcript.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::Path;
 
 use serde_json::Value;
 
 use crate::data::iso::parse_iso_to_epoch;
+use crate::data::transcript::lines_containing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
@@ -81,25 +79,20 @@ impl TaskList {
     /// Reconstruct the task list from `TaskCreate` / `TaskUpdate` tool-use
     /// events in the transcript.
     pub fn from_session(transcript_path: &str) -> Self {
-        if transcript_path.is_empty() {
-            return Self::default();
-        }
-        let p = Path::new(transcript_path);
-        if !p.is_file() {
-            return Self::default();
-        }
-        let file = match File::open(p) {
-            Ok(f) => f,
-            Err(_) => return Self::default(),
-        };
+        std::fs::read(transcript_path)
+            .map(|buf| Self::from_bytes(&buf))
+            .unwrap_or_default()
+    }
+
+    pub fn from_bytes(buf: &[u8]) -> Self {
         let mut by_id: BTreeMap<u64, Task> = BTreeMap::new();
         let mut next_id: u64 = 1;
         let mut last_ts: f64 = 0.0;
-        for ln in BufReader::new(file).lines().map_while(Result::ok) {
+        for ln in lines_containing(buf, b"\"Task") {
             if !ln.contains("\"TaskCreate\"") && !ln.contains("\"TaskUpdate\"") {
                 continue;
             }
-            let value: Value = match serde_json::from_str(&ln) {
+            let value: Value = match serde_json::from_str(ln) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
