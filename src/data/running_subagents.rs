@@ -161,13 +161,16 @@ impl RunningSubagents {
             if !jsonl.is_file() {
                 continue;
             }
-            let agent_id = meta_path
+            let agent_name = meta_path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .and_then(|name| name.strip_suffix(".meta.json"))
-                .map(|name| name.strip_prefix("agent-").unwrap_or(name))
                 .unwrap_or("");
-            if finished_marker(claude_dir, session_id, agent_id).is_some_and(|p| p.exists()) {
+            let finished = [Some(agent_name), agent_name.strip_prefix("agent-")]
+                .into_iter()
+                .flatten()
+                .any(|id| finished_marker(claude_dir, session_id, id).is_some_and(|p| p.exists()));
+            if finished {
                 continue;
             }
             let mtime = match jsonl.metadata().and_then(|m| m.modified()) {
@@ -468,27 +471,29 @@ mod tests {
             .join("s")
             .join("subagents");
         fs::create_dir_all(&subagents).unwrap();
-        for id in ["finished", "running"] {
+        for name in ["agent-finished", "agent-raw", "agent-running"] {
             fs::write(
-                subagents.join(format!("agent-{id}.meta.json")),
+                subagents.join(format!("{name}.meta.json")),
                 r#"{"agentType":"Explore","description":"look"}"#,
             )
             .unwrap();
             fs::write(
-                subagents.join(format!("agent-{id}.jsonl")),
+                subagents.join(format!("{name}.jsonl")),
                 b"{\"timestamp\":\"2026-05-27T07:30:00.000Z\"}\n",
             )
             .unwrap();
         }
         let prompt = parse_iso_to_epoch("2026-05-27T07:15:00.000Z");
         let load = || RunningSubagents::from_session(dir.path(), "s", "/p", prompt + 60.0, prompt);
-        assert_eq!(load().agents.len(), 2);
+        assert_eq!(load().agents.len(), 3);
         record_hook(dir.path(), "SubagentStop", "s", "finished");
+        record_hook(dir.path(), "SubagentStop", "s", "agent-raw");
         assert_eq!(load().agents.len(), 1);
         record_hook(dir.path(), "SubagentStart", "s", "finished");
-        assert_eq!(load().agents.len(), 2);
+        record_hook(dir.path(), "SubagentStart", "s", "agent-raw");
+        assert_eq!(load().agents.len(), 3);
         record_hook(dir.path(), "SubagentStop", "s", "finished");
         record_hook(dir.path(), "SessionEnd", "s", "");
-        assert_eq!(load().agents.len(), 2);
+        assert_eq!(load().agents.len(), 3);
     }
 }
