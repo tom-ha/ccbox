@@ -5,7 +5,7 @@
 //! | id                 | shown at densities             | notes                       |
 //! |--------------------|--------------------------------|-----------------------------|
 //! | `top-header`       | always                         | path/branch/venv/model row  |
-//! | `attention-row`    | always, when a session waits   | needs-you badge + others    |
+//! | `attention-row`    | opt-in (`ccbox show waiting`)  | needs-you badge + others    |
 //! | `context-row`      | always                         | context-line / compact form |
 //! | `tokens-cost-row`  | always (medium/wide only)      | tokens/cost/usage limits    |
 //! | `tasks-row`        | Standard, Verbose              | inline or board kanban      |

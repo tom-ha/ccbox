@@ -1,7 +1,7 @@
 //! Per-session runtime toggles at `<claude_dir>/ccbox-toggles.json`.
 //!
-//! The file is the most-recently-set visibility override for the tasks and
-//! subagents rows; both fields are optional, unknown keys are ignored, and
+//! The file is the most-recently-set visibility override for the tasks,
+//! subagents and waiting rows; every field is optional, unknown keys are ignored, and
 //! every failure mode (missing file, parse error, IO error) collapses to
 //! "no overrides" silently. The `--snapshot` output and `ccbox toggle status`
 //! both attribute decisions back to this file when its fields are set.
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// don't collide on the tempfile name.
 static TEMPFILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// The on-disk shape of `ccbox-toggles.json`. Both fields are optional;
+/// The on-disk shape of `ccbox-toggles.json`. Every field is optional;
 /// `Some(v)` forces the row to render iff `v`, `None` falls through to the
 /// env var (and then the density preset). Unknown JSON keys are ignored.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +26,8 @@ pub struct Toggles {
     pub show_tasks: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_subagents: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_waiting: Option<bool>,
 }
 
 /// Path of the state file inside `claude_dir`.
@@ -149,6 +151,7 @@ mod tests {
         let t = Toggles {
             show_tasks: Some(false),
             show_subagents: Some(true),
+            show_waiting: Some(true),
         };
         save(dir.path(), &t).unwrap();
         assert_eq!(load(dir.path()), t);
@@ -159,7 +162,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let t = Toggles {
             show_tasks: Some(false),
-            show_subagents: None,
+            ..Default::default()
         };
         save(dir.path(), &t).unwrap();
         let raw = std::fs::read_to_string(state_file_path(dir.path())).unwrap();
@@ -224,6 +227,7 @@ mod tests {
                         let t = Toggles {
                             show_tasks: Some(i % 2 == 0),
                             show_subagents: Some(i % 2 == 1),
+                            ..Default::default()
                         };
                         save(&p, &t).unwrap();
                     }
@@ -275,7 +279,7 @@ mod tests {
             load(dir.path()),
             Toggles {
                 show_tasks: Some(false),
-                show_subagents: None,
+                ..Default::default()
             }
         );
 
@@ -284,6 +288,7 @@ mod tests {
             &Toggles {
                 show_tasks: Some(false),
                 show_subagents: Some(true),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -292,6 +297,7 @@ mod tests {
             Toggles {
                 show_tasks: Some(false),
                 show_subagents: Some(true),
+                ..Default::default()
             }
         );
     }

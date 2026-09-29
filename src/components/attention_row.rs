@@ -1,3 +1,4 @@
+use crate::config::waiting_row_enabled;
 use crate::data::waiting::{Kind, Marker};
 use crate::glyphs::{BOLD, RESET};
 use crate::layout::RowSpec;
@@ -13,8 +14,17 @@ const REVERSE: &str = "\x1b[7m";
 pub struct AttentionRow;
 pub static ATTENTION_ROW: AttentionRow = AttentionRow;
 
+fn event(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Permission => "asked for permission",
+        Kind::Question => "asked a question",
+        Kind::YourTurn => "finished",
+    }
+}
+
 /// Tries progressively shorter forms until one fits `available`: the full
-/// list, a `+N waiting` count, this session's status alone, the bare badge.
+/// list, fewer entries plus `+N more`, a count, this session's status alone,
+/// the bare badge.
 pub fn attention_line(
     r: &Renderer,
     own: Option<&Marker>,
@@ -23,23 +33,33 @@ pub fn attention_line(
     available: usize,
 ) -> String {
     let t = r.theme;
-    let ago = |m: &Marker| fmt_reset((now - m.since) as i64);
+    let ago = |m: &Marker| match (now - m.since) as i64 {
+        s if s < 60 => "just now".to_string(),
+        s => format!("{} ago", fmt_reset(s)),
+    };
     let (own_full, own_short) = match own {
         Some(m) if m.kind == Kind::YourTurn => (
-            format!("{}⏸ your turn {}{RESET}", t.label, ago(m)),
+            format!(
+                "{}⏸ {} {}, your turn{RESET}",
+                t.label,
+                event(m.kind),
+                ago(m)
+            ),
             format!("{}⏸ your turn{RESET}", t.label),
         ),
-        Some(m) => (
-            format!(
-                "{}{BOLD}{REVERSE} ⏸ NEEDS YOU {RESET} {}{}{RESET} {}{}{RESET}",
-                t.alert,
-                t.alert,
-                m.kind.label(),
-                t.label,
-                ago(m),
-            ),
-            format!("{}{BOLD}{REVERSE} ⏸ NEEDS YOU {RESET}", t.alert),
-        ),
+        Some(m) => {
+            let badge = format!("{}{BOLD}{REVERSE} ⏸ NEEDS YOU {RESET}", t.alert);
+            (
+                format!(
+                    "{badge} {}{}{RESET} {}{}{RESET}",
+                    t.alert,
+                    event(m.kind),
+                    t.label,
+                    ago(m),
+                ),
+                badge,
+            )
+        }
         None => (String::new(), String::new()),
     };
     let join = |a: &str, b: &str| match (a.is_empty(), b.is_empty()) {
@@ -52,49 +72,44 @@ pub fn attention_line(
     let mut candidates = Vec::new();
     if !others.is_empty() {
         let lead = if own.is_some() {
-            "also waiting:"
+            String::new()
         } else {
-            "⏸ waiting:"
+            format!("{}⏸{RESET} ", t.label)
         };
-        let mut list = format!("{}{lead}{RESET}", t.label);
-        for (i, m) in others.iter().enumerate() {
-            let sep = if i == 0 {
-                " ".to_string()
+        let sep = format!(" {}·{RESET} ", t.label);
+        let items: Vec<String> = others
+            .iter()
+            .map(|m| {
+                let (clr, weight) = if m.kind == Kind::YourTurn {
+                    (t.label, "")
+                } else {
+                    (t.warn, BOLD)
+                };
+                format!(
+                    "{clr}{weight}{}{RESET} {}{} {}{RESET}",
+                    m.name.as_deref().unwrap_or("another session"),
+                    t.label,
+                    event(m.kind),
+                    ago(m),
+                )
+            })
+            .collect();
+        for shown in (1..=items.len()).rev() {
+            let rest = items.len() - shown;
+            let tail = if rest > 0 {
+                format!(" {}+{rest} more{RESET}", t.label)
             } else {
-                format!(" {}·{RESET} ", t.label)
+                String::new()
             };
-            let (clr, weight) = if m.kind == Kind::YourTurn {
-                (t.label, "")
-            } else {
-                (t.warn, BOLD)
-            };
-            let item = format!(
-                "{sep}{clr}{weight}{}{RESET} {}{} {}{RESET}",
-                m.name,
-                t.label,
-                m.kind.label(),
-                ago(m),
-            );
-            let rest = others.len() - i - 1;
-            let more = |n: usize| format!(" {}+{n} more{RESET}", t.label);
-            let tail = if rest > 0 { more(rest) } else { String::new() };
-            if !fits(&join(&own_full, &format!("{list}{item}{tail}"))) {
-                if i > 0 {
-                    list.push_str(&more(others.len() - i));
-                    candidates.push(join(&own_full, &list));
-                }
-                list.clear();
-                break;
-            }
-            list.push_str(&item);
-        }
-        if !list.is_empty() {
+            let list = format!("{lead}{}{tail}", items[..shown].join(&sep));
             candidates.push(join(&own_full, &list));
         }
+        let n = others.len();
         let count = if own.is_some() {
-            format!("{}+{} waiting{RESET}", t.label, others.len())
+            format!("{}+{n} more waiting{RESET}", t.label)
         } else {
-            format!("{}⏸ {} waiting{RESET}", t.label, others.len())
+            let noun = if n == 1 { "session" } else { "sessions" };
+            format!("{}⏸ {n} {noun} waiting{RESET}", t.label)
         };
         candidates.push(join(&own_full, &count));
         candidates.push(join(&own_short, &count));
@@ -114,7 +129,8 @@ impl Component for AttentionRow {
     }
 
     fn is_visible(&self, ctx: &ComponentContext) -> bool {
-        !ctx.data.waiting(ctx).is_empty()
+        waiting_row_enabled(ctx.env.toggles.show_waiting, ctx.env.show_waiting_override)
+            && !ctx.data.waiting(ctx).is_empty()
     }
 
     fn render(&self, ctx: &ComponentContext) -> ComponentOutput {
@@ -153,7 +169,7 @@ mod tests {
         Marker {
             kind,
             since,
-            name: name.into(),
+            name: Some(name.into()),
             pid: None,
             transcript_path: String::new(),
             agent_id: String::new(),
@@ -172,16 +188,35 @@ mod tests {
     #[test]
     fn own_session_gets_badge() {
         let me = m("me", Kind::Question, 820.0);
-        assert_eq!(plain(Some(&me), &[], 80), "  ⏸ NEEDS YOU  question 3m");
+        assert_eq!(
+            plain(Some(&me), &[], 80),
+            "  ⏸ NEEDS YOU  asked a question 3m ago"
+        );
     }
 
     #[test]
-    fn others_listed_with_kind_and_age() {
+    fn others_listed_as_sentences() {
         let a = m("api-fix", Kind::Permission, 940.0);
         let b = m("infra", Kind::YourTurn, 280.0);
         assert_eq!(
             plain(None, &[&a, &b], 100),
-            " ⏸ waiting: api-fix permission 1m · infra your turn 12m"
+            " ⏸ api-fix asked for permission 1m ago · infra finished 12m ago"
+        );
+    }
+
+    #[test]
+    fn unnamed_session_is_another_session() {
+        let mut a = m("", Kind::YourTurn, 640.0);
+        a.name = None;
+        assert_eq!(plain(None, &[&a], 80), " ⏸ another session finished 6m ago");
+    }
+
+    #[test]
+    fn under_a_minute_is_just_now() {
+        let a = m("api-fix", Kind::Question, 990.0);
+        assert_eq!(
+            plain(None, &[&a], 80),
+            " ⏸ api-fix asked a question just now"
         );
     }
 
@@ -191,12 +226,11 @@ mod tests {
         let b = m("bbbbbbbbbbbb", Kind::Permission, 940.0);
         let c = m("cccccccccccc", Kind::Permission, 940.0);
         let me = m("me", Kind::Question, 990.0);
-        let s = plain(Some(&me), &[&a, &b, &c], 80);
-        assert!(
-            s.contains("also waiting: aaaaaaaaaaaa permission 1m"),
-            "{s}"
+        assert_eq!(
+            plain(Some(&me), &[&a, &b, &c], 100),
+            "  ⏸ NEEDS YOU  asked a question just now   \
+             aaaaaaaaaaaa asked for permission 1m ago +2 more"
         );
-        assert!(s.ends_with("+2 more"), "{s}");
     }
 
     #[test]
@@ -204,12 +238,16 @@ mod tests {
         let me = m("me", Kind::Permission, 940.0);
         let a = m("api-fix-with-a-long-name", Kind::Question, 940.0);
         assert_eq!(
-            plain(Some(&me), &[&a], 41),
-            "  ⏸ NEEDS YOU  permission 1m   +1 waiting"
+            plain(Some(&me), &[&a], 60),
+            "  ⏸ NEEDS YOU  asked for permission 1m ago   +1 more waiting"
         );
-        assert_eq!(plain(Some(&me), &[&a], 40), "  ⏸ NEEDS YOU    +1 waiting");
-        assert_eq!(plain(Some(&me), &[&a], 26), "  ⏸ NEEDS YOU");
-        assert_eq!(plain(None, &[&a], 20), " ⏸ 1 waiting");
+        assert_eq!(
+            plain(Some(&me), &[&a], 59),
+            "  ⏸ NEEDS YOU    +1 more waiting"
+        );
+        assert_eq!(plain(Some(&me), &[&a], 31), "  ⏸ NEEDS YOU");
+        assert_eq!(plain(None, &[&a], 20), " ⏸ 1 session waiting");
+        assert_eq!(plain(None, &[&a, &me], 21), " ⏸ 2 sessions waiting");
     }
 
     #[test]
@@ -218,7 +256,7 @@ mod tests {
         let me = m("me", Kind::YourTurn, 820.0);
         let s = attention_line(&r, Some(&me), &[], 1000.0, 60);
         assert!(!s.contains(REVERSE), "{s:?}");
-        assert!(strip_ansi(&s).starts_with(" ⏸ your turn 3m"), "{s:?}");
+        assert_eq!(strip_ansi(&s).trim_end(), " ⏸ finished 3m ago, your turn");
 
         let idle = m("infra", Kind::YourTurn, 820.0);
         let s = attention_line(&r, None, &[&idle], 1000.0, 60);

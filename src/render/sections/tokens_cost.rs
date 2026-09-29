@@ -195,12 +195,16 @@ fn fmt_clock(now: f64, secs: i64, round_min: i64) -> String {
     fmt_clock_in(&Local, now, secs, round_min)
 }
 
-/// Neighbouring limits that reset together share one `resets` label, shown
-/// on the last of them.
-fn same_reset_as_next(lims: &[UsageLimit], i: usize) -> bool {
+/// A per-model limit that resets with its left neighbour (usually the week)
+/// leaves the `resets` label to it.
+fn same_reset_as_prev(lims: &[UsageLimit], i: usize) -> bool {
     match (
-        lims.get(i).and_then(|l| l.resets_in_secs),
-        lims.get(i + 1).and_then(|l| l.resets_in_secs),
+        i.checked_sub(1)
+            .and_then(|p| lims.get(p))
+            .and_then(|l| l.resets_in_secs),
+        lims.get(i)
+            .filter(|l| l.per_model)
+            .and_then(|l| l.resets_in_secs),
     ) {
         (Some(a), Some(b)) => (a - b).abs() < 120,
         _ => false,
@@ -442,7 +446,7 @@ impl Renderer {
             let lims = &limits[..plan.shown];
             let clusters = lims.iter().enumerate().map(|(i, l)| {
                 let d = plan.detail[i];
-                let shared = same_reset_as_next(lims, i) && plan.detail[i + 1].reset;
+                let shared = same_reset_as_prev(lims, i) && plan.detail[i - 1].reset;
                 let bar_w = bars.get(i).copied().unwrap_or(0);
                 self.limit_cluster(l, bar_w, d.forecast, d.reset && !shared)
             });
@@ -725,9 +729,26 @@ mod tests {
     }
 
     #[test]
-    fn shared_reset_stays_put_until_the_next_limit_shows_it() {
+    fn model_limit_leaves_a_shared_reset_to_the_week() {
         let r = Renderer::default();
-        let spend = Some(ExtraSpend::Estimated(3.41));
+        let lims = [session(61.0), week(89.0), fable(82.0)];
+        let mut fable_shown = false;
+        for box_width in 40..=200 {
+            let line = r.tokens_cost(1, 2, None, &lims, None, box_width);
+            let plain = strip_ansi(&line).into_owned();
+            let (Some(wk), Some(fab)) = (plain.find("week"), plain.find("Fable")) else {
+                continue;
+            };
+            fable_shown = true;
+            assert!(plain[wk..fab].contains("resets"), "{box_width}: {plain}");
+            assert!(!plain[fab..].contains("resets"), "{box_width}: {plain}");
+        }
+        assert!(fable_shown);
+    }
+
+    #[test]
+    fn session_and_week_keep_their_own_reset_when_they_coincide() {
+        let r = Renderer::default();
         let lims = [
             UsageLimit {
                 resets_in_secs: Some(7200),
@@ -735,13 +756,12 @@ mod tests {
             },
             UsageLimit {
                 resets_in_secs: Some(7260),
-                ..week(89.0)
+                ..week(100.0)
             },
         ];
-        let line = r.tokens_cost(1, 2, None, &lims, spend, 60);
+        let line = r.tokens_cost(1, 2, None, &lims, None, 140);
         let plain = strip_ansi(&line).into_owned();
-        assert!(plain.contains(" resets "), "{plain}");
-        assert!(!plain.contains("extra usage"), "{plain}");
+        assert_eq!(plain.matches(" resets ").count(), 2, "{plain}");
     }
 
     #[test]
@@ -1008,18 +1028,6 @@ mod tests {
             None,
             "10 min of weekly data is too little"
         );
-    }
-
-    #[test]
-    fn limits_resetting_together_share_one_label() {
-        let r = Renderer::default();
-        let fable = fable(82.0);
-        let line = r.tokens_cost(1, 2, None, &[session(13.0), week(84.0), fable], None, 140);
-        let plain = strip_ansi(&line).into_owned();
-        assert_eq!(plain.matches(" resets ").count(), 2, "{plain}");
-        let week_at = plain.find("week").unwrap();
-        let fable_at = plain.find("Fable").unwrap();
-        assert!(!plain[week_at..fable_at].contains("resets"), "{plain}");
     }
 
     #[test]
