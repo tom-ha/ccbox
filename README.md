@@ -83,6 +83,14 @@ export CCBOX_DENSITY=verbose                # show every available row
 
 Restart Claude Code after changing env vars — the statusline subprocess inherits its environment from the Claude Code parent, so changes only take effect on the next launch. See **Customize** below for the full list of knobs.
 
+## Codex CLI
+
+Interactive Codex has a built-in footer. Type `/statusline` inside Codex to pick
+and reorder its fields. For a view similar to ccbox's top rows, select the model,
+context usage, rate limits, Git branch, token counters, and current directory.
+Codex saves that choice in `tui.status_line` in `~/.codex/config.toml`.
+See [OpenAI Docs: developer commands](https://learn.chatgpt.com/docs/developer-commands#configure-footer-items-with-statusline).
+
 ## Updating
 
 A ccbox installed before the first release (v0.6.0), which was always a source build from `main`, has no `update` command and never shows the notice. Re-run the install one-liner once to move it onto releases; from then on, `ccbox update` does it.
