@@ -7,8 +7,12 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-29
+
 ### Changed
 
+- Git status is cached for 10 s instead of 2 s, reducing Git calls during
+  idle redraws. Branch and changed-file counts can lag by up to 10 s.
 - Rendering reads the session transcript once instead of once per row, and
   finds the lines each row needs without parsing the rest. With a 25 MB
   transcript a render takes about 30 ms instead of 72 ms.
