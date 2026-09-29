@@ -2,10 +2,11 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+
+use crate::data::transcript::lines_containing;
 
 #[derive(Debug, Default, Clone)]
 pub struct LoadedSkills {
@@ -21,20 +22,20 @@ static SKILL_PATH_PAT: Lazy<Regex> =
 
 impl LoadedSkills {
     pub fn from_transcript(transcript_path: &str) -> Self {
-        if transcript_path.is_empty() {
-            return Self::default();
-        }
-        let p = Path::new(transcript_path);
-        if !p.is_file() {
-            return Self::default();
-        }
-        let contents = match fs::read_to_string(p) {
-            Ok(s) => s,
-            Err(_) => return Self::default(),
-        };
+        fs::read(transcript_path)
+            .map(|buf| Self::from_bytes(&buf))
+            .unwrap_or_default()
+    }
+
+    pub fn from_bytes(buf: &[u8]) -> Self {
         let mut seen: HashSet<String> = HashSet::new();
         let mut order: Vec<String> = Vec::new();
-        for ln in contents.lines() {
+        let mut lines: Vec<&str> = lines_containing(buf, br#""Skill""#)
+            .chain(lines_containing(buf, b"SKILL.md"))
+            .collect();
+        lines.sort_by_key(|l| l.as_ptr());
+        lines.dedup_by_key(|l| l.as_ptr());
+        for ln in lines {
             if ln.contains(r#""Skill""#) {
                 for m in SKILL_PAT.captures_iter(ln) {
                     if let Some(name) = m.get(1) {

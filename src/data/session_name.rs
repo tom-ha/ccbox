@@ -1,28 +1,28 @@
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use crate::data::transcript::lines_containing;
+
+pub fn from_transcript(transcript_path: &str) -> Option<String> {
+    from_bytes(&std::fs::read(transcript_path).ok()?)
+}
 
 /// `custom-title` records come from `/rename`. `ai-title` is skipped because
 /// nearly every session has one.
-pub fn from_transcript(transcript_path: &str) -> Option<String> {
-    let file = File::open(transcript_path).ok()?;
-    let (mut custom, mut agent) = (None, None);
-    for ln in BufReader::new(file).lines().map_while(Result::ok) {
-        let (slot, key) = if ln.starts_with(r#"{"type":"custom-title""#) {
-            (&mut custom, "customTitle")
-        } else if ln.starts_with(r#"{"type":"agent-name""#) {
-            (&mut agent, "agentName")
-        } else {
-            continue;
-        };
-        if let Some(name) = serde_json::from_str::<serde_json::Value>(&ln)
-            .ok()
-            .and_then(|v| v.get(key)?.as_str().map(str::trim).map(String::from))
-            .filter(|s| !s.is_empty())
-        {
-            *slot = Some(name);
-        }
-    }
-    custom.or(agent)
+pub fn from_bytes(buf: &[u8]) -> Option<String> {
+    let last = |prefix: &str, key: &str| {
+        lines_containing(buf, prefix.as_bytes())
+            .filter(|ln| ln.starts_with(prefix))
+            .filter_map(|ln| {
+                serde_json::from_str::<serde_json::Value>(ln)
+                    .ok()?
+                    .get(key)?
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            })
+            .last()
+    };
+    last(r#"{"type":"custom-title""#, "customTitle")
+        .or_else(|| last(r#"{"type":"agent-name""#, "agentName"))
 }
 
 #[cfg(test)]

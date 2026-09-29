@@ -2,9 +2,11 @@
 //! JSONL file.
 
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::Path;
+
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::data::transcript::lines_containing;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TranscriptUsage {
@@ -14,52 +16,54 @@ pub struct TranscriptUsage {
     pub output_tokens: u64,
 }
 
+#[derive(Deserialize)]
+struct Line {
+    message: Message,
+}
+
+#[derive(Deserialize)]
+struct Message {
+    #[serde(default)]
+    id: Option<Value>,
+    #[serde(default)]
+    usage: Option<Value>,
+}
+
 impl TranscriptUsage {
     pub fn billed_in(&self) -> u64 {
         self.input_tokens + self.cache_creation_input_tokens
     }
 
     pub fn from_transcript(transcript_path: &str) -> Self {
-        if transcript_path.is_empty() {
-            return Self::default();
-        }
-        let p = Path::new(transcript_path);
-        if !p.is_file() {
-            return Self::default();
-        }
-        let file = match File::open(p) {
-            Ok(f) => f,
-            Err(_) => return Self::default(),
-        };
-        let mut seen: HashSet<String> = HashSet::new();
+        std::fs::read(transcript_path)
+            .map(|buf| Self::from_bytes(&buf))
+            .unwrap_or_default()
+    }
+
+    /// Sums each assistant message's usage once, however many lines repeat its id.
+    pub fn from_bytes(buf: &[u8]) -> Self {
+        let mut seen: HashSet<&str> = HashSet::new();
         let mut acc = Self::default();
-        for ln in BufReader::new(file).lines().map_while(Result::ok) {
-            // Cheap prefilter — only assistant-with-usage lines matter.
-            if memchr::memmem::find(ln.as_bytes(), b"\"usage\"").is_none()
-                || memchr::memmem::find(ln.as_bytes(), b"\"assistant\"").is_none()
-            {
+        let mut owned: Vec<Line> = Vec::new();
+        for ln in lines_containing(buf, b"\"usage\"") {
+            if memchr::memmem::find(ln.as_bytes(), b"\"assistant\"").is_none() {
                 continue;
             }
-            let value: serde_json::Value = match serde_json::from_str(&ln) {
-                Ok(v) => v,
-                Err(_) => continue,
+            if let Ok(line) = serde_json::from_str::<Line>(ln) {
+                owned.push(line);
+            }
+        }
+        for line in &owned {
+            let Some(mid) = line.message.id.as_ref().and_then(Value::as_str) else {
+                continue;
             };
-            let msg = match value.get("message") {
-                Some(serde_json::Value::Object(_)) => &value["message"],
-                _ => continue,
-            };
-            let mid = match msg.get("id").and_then(|v| v.as_str()) {
-                Some(s) if !s.is_empty() => s.to_string(),
-                _ => continue,
-            };
-            if !seen.insert(mid) {
+            if mid.is_empty() || !seen.insert(mid) {
                 continue;
             }
-            let u = match msg.get("usage") {
-                Some(v) if v.is_object() => v,
-                _ => continue,
+            let Some(u) = line.message.usage.as_ref().filter(|v| v.is_object()) else {
+                continue;
             };
-            let g = |k: &str| -> u64 { u.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
+            let g = |k: &str| -> u64 { u.get(k).and_then(Value::as_u64).unwrap_or(0) };
             acc.input_tokens += g("input_tokens");
             acc.cache_creation_input_tokens += g("cache_creation_input_tokens");
             acc.cache_read_input_tokens += g("cache_read_input_tokens");

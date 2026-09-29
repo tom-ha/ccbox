@@ -12,7 +12,6 @@ pub const MAX_BACKOFF_SECS: f64 = 7.0 * 24.0 * 3600.0;
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
 /// A spawned check is presumed still running for this long, so renders don't pile up spawns.
 const SPAWN_GRACE_SECS: f64 = 600.0;
-const LOCK_STALE_SECS: f64 = 120.0;
 const CLOCK_SLACK_SECS: f64 = 5.0;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -42,7 +41,60 @@ fn spawn_marker(claude_dir: &Path) -> PathBuf {
 }
 
 fn lock_path(claude_dir: &Path) -> PathBuf {
-    dir(claude_dir).join("update-check.lock")
+    dir(claude_dir).join("update-check.flock")
+}
+
+/// Held until dropped; the kernel also releases it if the holder dies, so it never goes stale.
+#[cfg(unix)]
+struct Lock(fs::File);
+
+#[cfg(unix)]
+extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
+
+#[cfg(unix)]
+fn try_lock(path: &Path) -> Option<Lock> {
+    use std::os::unix::io::AsRawFd;
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .ok()?;
+    (unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0).then_some(Lock(file))
+}
+
+/// Unlocks explicitly: a child forked meanwhile shares the open file, so closing alone could keep it held.
+#[cfg(unix)]
+impl Drop for Lock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        const LOCK_UN: i32 = 8;
+        unsafe { flock(self.0.as_raw_fd(), LOCK_UN) };
+    }
+}
+
+#[cfg(not(unix))]
+struct Lock(PathBuf);
+
+#[cfg(not(unix))]
+fn try_lock(path: &Path) -> Option<Lock> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .ok()
+        .map(|_| Lock(path.to_path_buf()))
+}
+
+#[cfg(not(unix))]
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 pub fn interval_secs(failures: u32) -> f64 {
@@ -128,18 +180,9 @@ pub fn run_check_with(
         return;
     }
     let _ = fs::create_dir_all(dir(claude_dir));
-    let lock = lock_path(claude_dir);
-    if mtime_secs(&lock).is_some_and(|t| !recent(t, now, LOCK_STALE_SECS)) {
-        let _ = fs::remove_file(&lock);
-    }
-    if OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock)
-        .is_err()
-    {
+    let Some(_lock) = try_lock(&lock_path(claude_dir)) else {
         return;
-    }
+    };
     let mut cache = read_cache(claude_dir);
     if check_due(&cache, now) {
         match fetch() {
@@ -152,7 +195,6 @@ pub fn run_check_with(
         cache.checked_at = now;
         write_cache(claude_dir, &cache);
     }
-    let _ = fs::remove_file(&lock);
 }
 
 fn write_cache(claude_dir: &Path, cache: &Cache) {
@@ -304,7 +346,7 @@ mod tests {
         assert_eq!(calls.get(), 1);
         run_check_with(d.path(), T0 + DAY, true, fetch);
         assert_eq!(calls.get(), 2);
-        assert!(!lock_path(d.path()).exists());
+        assert!(try_lock(&lock_path(d.path())).is_some(), "lock released");
     }
 
     #[test]
@@ -321,15 +363,39 @@ mod tests {
     }
 
     #[test]
-    fn a_held_lock_skips_the_check_and_a_stale_one_is_broken() {
+    fn a_held_lock_skips_the_check_until_its_holder_lets_go() {
         let d = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir(d.path())).unwrap();
-        fs::write(lock_path(d.path()), "").unwrap();
-        let now = mtime_secs(&lock_path(d.path())).unwrap();
-        run_check_with(d.path(), now, true, || panic!("lock is held"));
-        run_check_with(d.path(), now + LOCK_STALE_SECS + 1.0, true, || {
-            Ok(Some("1.2.3".into()))
-        });
+        let held = try_lock(&lock_path(d.path())).unwrap();
+        run_check_with(d.path(), T0, true, || panic!("lock is held"));
+        drop(held);
+        run_check_with(d.path(), T0, true, || Ok(Some("1.2.3".into())));
         assert_eq!(read_cache(d.path()).latest.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn racing_checks_over_a_dead_holders_lock_file_ask_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Barrier;
+        for _ in 0..20 {
+            let d = tempfile::tempdir().unwrap();
+            fs::create_dir_all(dir(d.path())).unwrap();
+            fs::write(lock_path(d.path()), "").unwrap();
+            let calls = AtomicUsize::new(0);
+            let start = Barrier::new(16);
+            std::thread::scope(|s| {
+                for _ in 0..16 {
+                    s.spawn(|| {
+                        start.wait();
+                        run_check_with(d.path(), T0, true, || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            Ok(Some("9.9.9".into()))
+                        });
+                    });
+                }
+            });
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
     }
 }
