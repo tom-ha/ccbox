@@ -9,6 +9,10 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
 
 ### Fixed
 
+- The background update check could ask the release source twice in a day
+  when two checks started at once after an earlier one had crashed. Its lock
+  is now released by the kernel when the holder exits, so it never goes
+  stale.
 - Finished subagents leave the statusline when their completion hook runs, even
   while the session is idle. Running background subagents remain visible.
 
