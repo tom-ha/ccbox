@@ -257,13 +257,22 @@ fn run_hook() -> ExitCode {
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
     let claude_dir = resolve_claude_dir();
+    let input = serde_json::from_str::<ccbox::data::waiting::HookInput>(&raw).ok();
+    if let Some(input) = &input {
+        ccbox::data::running_subagents::record_hook(
+            &claude_dir,
+            &input.hook_event_name,
+            &input.session_id,
+            &input.agent_id,
+        );
+    }
     if !waiting_row_enabled(
         toggles::load(&claude_dir).show_waiting,
         Row::Waiting.env_override(),
     ) {
         return ExitCode::SUCCESS;
     }
-    if let Ok(input) = serde_json::from_str::<ccbox::data::waiting::HookInput>(&raw) {
+    if let Some(input) = input {
         ccbox::data::waiting::apply_hook(
             &claude_dir,
             &input,

@@ -7,6 +7,11 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
 
 ## [Unreleased]
 
+### Fixed
+
+- Finished subagents leave the statusline when their completion hook runs, even
+  while the session is idle. Running background subagents remain visible.
+
 ## [0.7.0] - 2026-09-27
 
 ### Changed
