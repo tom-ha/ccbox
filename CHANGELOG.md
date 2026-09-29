@@ -13,6 +13,29 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
   finds the lines each row needs without parsing the rest. With a 25 MB
   transcript a render takes about 30 ms instead of 72 ms.
 
+### Fixed
+
+- Finished subagents leave the statusline when their completion hook runs, even
+  while the session is idle. Running background subagents remain visible.
+
+## [0.7.0] - 2026-09-27
+
+### Changed
+
+- The waiting ("needs you") row is off by default. `ccbox show waiting` or
+  `CCBOX_SHOW_WAITING=1` turns it on; while it is off, ccbox's hook records
+  nothing.
+- The waiting row names a session only by its `/rename` title. A session that
+  was never renamed shows as "another session" instead of its folder and
+  session-ID prefix, and each entry reads as a sentence:
+  `api-fix asked for permission 1m ago · another session finished 6m ago`.
+
+### Fixed
+
+- The week's reset time shows on the week. When a per-model limit such as
+  `Fable` reset at the same time, the time appeared only after that limit, so
+  the week looked like it had none.
+
 ## [0.6.0] - 2026-09-27
 
 ### Added

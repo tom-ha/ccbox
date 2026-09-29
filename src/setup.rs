@@ -13,6 +13,7 @@ pub const HOOK_EVENTS: &[(&str, &[&str])] = &[
     ("PostToolUseFailure", &[""]),
     ("UserPromptSubmit", &[""]),
     ("Stop", &[""]),
+    ("SubagentStart", &[""]),
     ("SubagentStop", &[""]),
     ("SessionEnd", &[""]),
 ];
