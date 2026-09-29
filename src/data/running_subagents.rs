@@ -45,10 +45,51 @@ pub struct RunningSubagents {
 }
 
 /// Fallback retention window used when the caller can't supply a
-/// `last_prompt_ts` (e.g. brand-new session with no user message yet). Tuned
-/// long enough to span a typical prompt-response cycle so freshly-finished
-/// agents stay visible until the next prompt resets the boundary.
+/// `last_prompt_ts` (e.g. brand-new session with no user message yet).
 const STALE_SECONDS: f64 = 600.0;
+
+fn safe_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn finished_marker(claude_dir: &Path, session_id: &str, agent_id: &str) -> Option<PathBuf> {
+    (safe_id(session_id) && safe_id(agent_id)).then(|| {
+        claude_dir
+            .join("ccbox-cache")
+            .join("subagents")
+            .join(session_id)
+            .join(format!("{agent_id}.done"))
+    })
+}
+
+pub fn record_hook(claude_dir: &Path, event: &str, session_id: &str, agent_id: &str) {
+    if event == "SessionEnd" && safe_id(session_id) {
+        let _ = fs::remove_dir_all(
+            claude_dir
+                .join("ccbox-cache")
+                .join("subagents")
+                .join(session_id),
+        );
+        return;
+    }
+    let Some(marker) = finished_marker(claude_dir, session_id, agent_id) else {
+        return;
+    };
+    match event {
+        "SubagentStart" => {
+            let _ = fs::remove_file(marker);
+        }
+        "SubagentStop" => {
+            if let Some(parent) = marker.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(marker, []);
+        }
+        _ => {}
+    }
+}
 
 fn project_slug(project_dir: &str) -> String {
     project_dir
@@ -63,10 +104,9 @@ impl RunningSubagents {
     /// `last_prompt_ts` is the Unix epoch second of the most recent real
     /// user prompt (see [`crate::data::user_messages::last_user_prompt_ts`]).
     /// When `> 0.0`, an agent is retained iff its `first_timestamp` is at
-    /// or after that boundary — i.e. it belongs to the current prompt cycle
-    /// — so a completed agent stays visible until the user submits the next
-    /// prompt. When `0.0` (no anchor available), falls back to a wide
-    /// `STALE_SECONDS` mtime window.
+    /// or after that boundary, unless its completion hook has fired. When
+    /// `0.0` (no anchor available), falls back to the `STALE_SECONDS` mtime
+    /// window.
     pub fn from_session(
         claude_dir: &Path,
         session_id: &str,
@@ -119,6 +159,15 @@ impl RunningSubagents {
             };
             let jsonl = meta_path.with_extension("").with_extension("jsonl");
             if !jsonl.is_file() {
+                continue;
+            }
+            let agent_id = meta_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".meta.json"))
+                .map(|name| name.strip_prefix("agent-").unwrap_or(name))
+                .unwrap_or("");
+            if finished_marker(claude_dir, session_id, agent_id).is_some_and(|p| p.exists()) {
                 continue;
             }
             let mtime = match jsonl.metadata().and_then(|m| m.modified()) {
@@ -407,5 +456,39 @@ mod tests {
         let r = RunningSubagents::from_session(dir.path(), "s", "/p", now, last_prompt_ts);
         assert_eq!(r.agents.len(), 1, "got: {:?}", r.agents);
         assert_eq!(r.agents[0].agent_type, "Plan");
+    }
+
+    #[test]
+    fn stopped_agent_disappears_before_the_next_prompt() {
+        let dir = tempdir().unwrap();
+        let subagents = dir
+            .path()
+            .join("projects")
+            .join(project_slug("/p"))
+            .join("s")
+            .join("subagents");
+        fs::create_dir_all(&subagents).unwrap();
+        for id in ["finished", "running"] {
+            fs::write(
+                subagents.join(format!("agent-{id}.meta.json")),
+                r#"{"agentType":"Explore","description":"look"}"#,
+            )
+            .unwrap();
+            fs::write(
+                subagents.join(format!("agent-{id}.jsonl")),
+                b"{\"timestamp\":\"2026-05-27T07:30:00.000Z\"}\n",
+            )
+            .unwrap();
+        }
+        let prompt = parse_iso_to_epoch("2026-05-27T07:15:00.000Z");
+        let load = || RunningSubagents::from_session(dir.path(), "s", "/p", prompt + 60.0, prompt);
+        assert_eq!(load().agents.len(), 2);
+        record_hook(dir.path(), "SubagentStop", "s", "finished");
+        assert_eq!(load().agents.len(), 1);
+        record_hook(dir.path(), "SubagentStart", "s", "finished");
+        assert_eq!(load().agents.len(), 2);
+        record_hook(dir.path(), "SubagentStop", "s", "finished");
+        record_hook(dir.path(), "SessionEnd", "s", "");
+        assert_eq!(load().agents.len(), 2);
     }
 }
