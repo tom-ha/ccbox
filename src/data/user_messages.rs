@@ -11,56 +11,38 @@
 //! Only the first kind anchors a prompt boundary. The other two ride inside
 //! an ongoing prompt-response cycle and should not advance the boundary.
 
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::Path;
-
 use serde_json::Value;
 
 use crate::data::iso::parse_iso_to_epoch;
+use crate::data::transcript::lines_containing_rev;
 
 /// Returns the Unix epoch seconds of the most recent real user prompt in
 /// `transcript_path`, or `0.0` if no prompt is found (or the file is
 /// missing/empty/unreadable).
 pub fn last_user_prompt_ts(transcript_path: &str) -> f64 {
-    if transcript_path.is_empty() {
-        return 0.0;
-    }
-    let p = Path::new(transcript_path);
-    if !p.is_file() {
-        return 0.0;
-    }
-    let file = match File::open(p) {
-        Ok(f) => f,
-        Err(_) => return 0.0,
-    };
-    let mut latest = 0.0_f64;
-    for ln in BufReader::new(file).lines().map_while(Result::ok) {
-        // Cheap pre-filter before paying JSON parse.
-        if !ln.contains("\"type\":\"user\"") {
-            continue;
-        }
-        let v: Value = match serde_json::from_str(&ln) {
+    std::fs::read(transcript_path)
+        .map(|buf| last_user_prompt_ts_in(&buf))
+        .unwrap_or(0.0)
+}
+
+/// Scans from the end, so it reads only back to the most recent prompt.
+pub fn last_user_prompt_ts_in(buf: &[u8]) -> f64 {
+    for ln in lines_containing_rev(buf, b"\"type\":\"user\"") {
+        let v: Value = match serde_json::from_str(ln) {
             Ok(v) => v,
             Err(_) => continue,
         };
         if v.get("type").and_then(|x| x.as_str()) != Some("user") {
             continue;
         }
-        // Skip meta-flagged entries (e.g. /clear lines).
         if v.get("isMeta").and_then(|x| x.as_bool()) == Some(true) {
             continue;
         }
-        let content = v.get("message").and_then(|m| m.get("content"));
-        let is_real_prompt = match content {
+        let is_real_prompt = match v.get("message").and_then(|m| m.get("content")) {
             Some(Value::String(_)) => true,
-            Some(Value::Array(arr)) => {
-                // An array content is a tool_result envelope; only treat it as
-                // a user prompt if no entry is a tool_result.
-                !arr.iter().any(|item| {
-                    item.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-                })
-            }
+            Some(Value::Array(arr)) => !arr
+                .iter()
+                .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_result")),
             _ => false,
         };
         if !is_real_prompt {
@@ -71,16 +53,18 @@ pub fn last_user_prompt_ts(transcript_path: &str) -> f64 {
             .and_then(|x| x.as_str())
             .map(parse_iso_to_epoch)
             .unwrap_or(0.0);
-        if ts > latest {
-            latest = ts;
+        if ts > 0.0 {
+            return ts;
         }
     }
-    latest
+    0.0
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
     use std::io::Write;
+    use std::path::Path;
 
     use tempfile::tempdir;
 

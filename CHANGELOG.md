@@ -7,6 +7,12 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
 
 ## [Unreleased]
 
+### Changed
+
+- Rendering reads the session transcript once instead of once per row, and
+  finds the lines each row needs without parsing the rest. With a 25 MB
+  transcript a render takes about 30 ms instead of 72 ms.
+
 ### Fixed
 
 - The background update check could ask the release source twice in a day

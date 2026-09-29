@@ -24,7 +24,7 @@ use crate::data::task_list::TaskList;
 use crate::data::token_log::TokenLog;
 use crate::data::transcript_usage::TranscriptUsage;
 use crate::data::update_check::{self, Cache as UpdateCheck};
-use crate::data::user_messages::last_user_prompt_ts;
+use crate::data::user_messages::last_user_prompt_ts_in;
 
 use super::context::ComponentContext;
 
@@ -33,6 +33,7 @@ use super::context::ComponentContext;
 /// touches and token-log writes happen on first access only.
 #[derive(Default)]
 pub struct RenderCache {
+    transcript: OnceCell<Vec<u8>>,
     transcript_usage: OnceCell<TranscriptUsage>,
     token_log: OnceCell<TokenLog>,
     git_info: OnceCell<GitInfo>,
@@ -55,9 +56,14 @@ impl RenderCache {
         Self::default()
     }
 
+    fn transcript(&self, ctx: &ComponentContext) -> &[u8] {
+        self.transcript
+            .get_or_init(|| std::fs::read(&ctx.session.transcript_path).unwrap_or_default())
+    }
+
     pub fn transcript_usage(&self, ctx: &ComponentContext) -> &TranscriptUsage {
         self.transcript_usage
-            .get_or_init(|| TranscriptUsage::from_transcript(&ctx.session.transcript_path))
+            .get_or_init(|| TranscriptUsage::from_bytes(self.transcript(ctx)))
     }
 
     pub fn token_log(&self, ctx: &ComponentContext) -> &TokenLog {
@@ -95,13 +101,13 @@ impl RenderCache {
 
     pub fn task_list(&self, ctx: &ComponentContext) -> &TaskList {
         self.task_list
-            .get_or_init(|| TaskList::from_session(&ctx.session.transcript_path))
+            .get_or_init(|| TaskList::from_bytes(self.transcript(ctx)))
     }
 
     pub fn last_prompt_ts(&self, ctx: &ComponentContext) -> f64 {
         *self
             .last_prompt_ts
-            .get_or_init(|| last_user_prompt_ts(&ctx.session.transcript_path))
+            .get_or_init(|| last_user_prompt_ts_in(self.transcript(ctx)))
     }
 
     pub fn running_subagents(&self, ctx: &ComponentContext) -> &RunningSubagents {
@@ -124,12 +130,12 @@ impl RenderCache {
 
     pub fn loaded_skills(&self, ctx: &ComponentContext) -> &LoadedSkills {
         self.loaded_skills
-            .get_or_init(|| LoadedSkills::from_transcript(&ctx.session.transcript_path))
+            .get_or_init(|| LoadedSkills::from_bytes(self.transcript(ctx)))
     }
 
     pub fn session_name(&self, ctx: &ComponentContext) -> Option<&str> {
         self.session_name
-            .get_or_init(|| session_name::from_transcript(&ctx.session.transcript_path))
+            .get_or_init(|| session_name::from_bytes(self.transcript(ctx)))
             .as_deref()
     }
 
