@@ -440,7 +440,7 @@ fn populated_rate_limits_writes_marker() {
 #[test]
 fn needs_you_row_keeps_every_line_the_same_width() {
     use ccbox::data::waiting::{apply_hook, HookInput};
-    let sc = scratch();
+    let mut sc = scratch();
     let s = fixture();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -459,6 +459,11 @@ fn needs_you_row_keeps_every_line_the_same_width() {
         .unwrap();
         apply_hook(&sc.env.claude_dir, &input, now, || None);
     }
+    assert!(
+        !strip_ansi(&render(&s, &sc.env, 100)).contains("NEEDS YOU"),
+        "the row is off by default"
+    );
+    sc.env.show_waiting_override = Some(true);
     for width in [44, 60, 80, 100, 140] {
         let out = render(&s, &sc.env, width);
         assert!(strip_ansi(&out).contains("NEEDS YOU"), "{width}");

@@ -5,8 +5,8 @@ use std::process::ExitCode;
 
 use ccbox::{
     config::{
-        parse_bool_tristate, parse_density, parse_tasks_view, resolve_row_visibility, Density, Env,
-        RowVisibilitySource, TasksView,
+        parse_bool_tristate, parse_density, parse_tasks_view, resolve_row_visibility,
+        waiting_row_enabled, Density, Env, RowVisibilitySource, TasksView,
     },
     consts::{DEFAULT_MAX_WIDTH, MIN_WIDTH},
     input::session::SessionInfo,
@@ -122,9 +122,6 @@ fn main() -> ExitCode {
         .unwrap_or(DEFAULT_MAX_WIDTH);
 
     let show_cost_override = parse_bool_tristate(env::var("CCBOX_SHOW_COST").ok().as_deref());
-    let show_tasks_override = parse_bool_tristate(env::var("CCBOX_SHOW_TASKS").ok().as_deref());
-    let show_subagents_override =
-        parse_bool_tristate(env::var("CCBOX_SHOW_SUBAGENTS").ok().as_deref());
     let toggles = toggles::load(&claude_dir);
     let density: Density = env::var("CCBOX_DENSITY")
         .ok()
@@ -139,7 +136,7 @@ fn main() -> ExitCode {
     let git_cache_ttl_ms: u64 = env::var("CCBOX_GIT_CACHE_TTL_MS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(2000);
+        .unwrap_or(10_000);
     let venv = read_venv_name();
     let env_struct = Env {
         claude_dir: claude_dir.clone(),
@@ -147,8 +144,9 @@ fn main() -> ExitCode {
         max_width: Some(max_width),
         full_width,
         show_cost_override,
-        show_tasks_override,
-        show_subagents_override,
+        show_tasks_override: Row::Tasks.env_override(),
+        show_subagents_override: Row::Subagents.env_override(),
+        show_waiting_override: Row::Waiting.env_override(),
         toggles,
         venv,
         density,
@@ -258,9 +256,25 @@ fn run_hook() -> ExitCode {
     use std::io::Read;
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
-    if let Ok(input) = serde_json::from_str::<ccbox::data::waiting::HookInput>(&raw) {
+    let claude_dir = resolve_claude_dir();
+    let input = serde_json::from_str::<ccbox::data::waiting::HookInput>(&raw).ok();
+    if let Some(input) = &input {
+        ccbox::data::running_subagents::record_hook(
+            &claude_dir,
+            &input.hook_event_name,
+            &input.session_id,
+            &input.agent_id,
+        );
+    }
+    if !waiting_row_enabled(
+        toggles::load(&claude_dir).show_waiting,
+        Row::Waiting.env_override(),
+    ) {
+        return ExitCode::SUCCESS;
+    }
+    if let Some(input) = input {
         ccbox::data::waiting::apply_hook(
-            &resolve_claude_dir(),
+            &claude_dir,
             &input,
             now_secs(),
             ccbox::data::waiting::owner_pid,
@@ -291,8 +305,6 @@ fn resolve_density() -> Density {
 /// via the input::toggles module) or prints the resolved table.
 fn run_toggle(args: &[String]) -> ExitCode {
     let claude_dir = resolve_claude_dir();
-    let env_tasks = parse_bool_tristate(env::var("CCBOX_SHOW_TASKS").ok().as_deref());
-    let env_subs = parse_bool_tristate(env::var("CCBOX_SHOW_SUBAGENTS").ok().as_deref());
     let density = resolve_density();
     let current = toggles::load(&claude_dir);
 
@@ -316,11 +328,9 @@ fn run_toggle(args: &[String]) -> ExitCode {
             &claude_dir,
             current,
             args.get(1),
-            env_tasks,
-            env_subs,
             density,
         ),
-        Some("status") => print_status(&current, env_tasks, env_subs, density),
+        Some("status") => print_status(&current, density),
         Some(other) => {
             eprintln!("ccbox toggle: unknown subcommand: {other}");
             print_toggle_help();
@@ -337,18 +347,18 @@ const LEGACY_TOGGLE_PREFIX: &str = "ccbox toggle";
 const VERB_PREFIX: &str = "ccbox";
 
 fn parse_row(prefix: &str, name: Option<&String>) -> Result<Row, ExitCode> {
-    match name.map(String::as_str) {
-        Some("tasks") => Ok(Row::Tasks),
-        Some("subagents") => Ok(Row::Subagents),
-        Some(other) => {
-            eprintln!("{prefix}: unknown row: {other} (expected 'tasks' or 'subagents')");
-            Err(ExitCode::from(2))
-        }
-        None => {
-            eprintln!("{prefix}: missing row argument (expected 'tasks' or 'subagents')");
-            Err(ExitCode::from(2))
-        }
-    }
+    const EXPECTED: &str = "expected 'tasks', 'subagents' or 'waiting'";
+    let Some(name) = name else {
+        eprintln!("{prefix}: missing row argument ({EXPECTED})");
+        return Err(ExitCode::from(2));
+    };
+    Row::ALL
+        .into_iter()
+        .find(|r| r.name() == name)
+        .ok_or_else(|| {
+            eprintln!("{prefix}: unknown row: {name} ({EXPECTED})");
+            ExitCode::from(2)
+        })
 }
 
 fn run_row_verb(verb: &str, args: &[String]) -> ExitCode {
@@ -371,8 +381,6 @@ fn run_row_verb(verb: &str, args: &[String]) -> ExitCode {
             &claude_dir,
             current,
             args.first(),
-            parse_bool_tristate(env::var("CCBOX_SHOW_TASKS").ok().as_deref()),
-            parse_bool_tristate(env::var("CCBOX_SHOW_SUBAGENTS").ok().as_deref()),
             resolve_density(),
         ),
     }
@@ -398,14 +406,7 @@ fn run_status(args: &[String]) -> ExitCode {
         return code;
     }
     let claude_dir = resolve_claude_dir();
-    let env_tasks = parse_bool_tristate(env::var("CCBOX_SHOW_TASKS").ok().as_deref());
-    let env_subs = parse_bool_tristate(env::var("CCBOX_SHOW_SUBAGENTS").ok().as_deref());
-    print_status(
-        &toggles::load(&claude_dir),
-        env_tasks,
-        env_subs,
-        resolve_density(),
-    );
+    print_status(&toggles::load(&claude_dir), resolve_density());
     let cache = ccbox::data::update_check::read_cache(&claude_dir);
     let latest = if cache.checked_at <= 0.0 {
         "unknown (not checked yet)".to_string()
@@ -441,12 +442,35 @@ fn run_status(args: &[String]) -> ExitCode {
 enum Row {
     Tasks,
     Subagents,
+    Waiting,
+}
+
+impl Row {
+    const ALL: [Row; 3] = [Row::Tasks, Row::Subagents, Row::Waiting];
+
+    fn name(self) -> &'static str {
+        match self {
+            Row::Tasks => "tasks",
+            Row::Subagents => "subagents",
+            Row::Waiting => "waiting",
+        }
+    }
+
+    fn env_override(self) -> Option<bool> {
+        let var = match self {
+            Row::Tasks => "CCBOX_SHOW_TASKS",
+            Row::Subagents => "CCBOX_SHOW_SUBAGENTS",
+            Row::Waiting => "CCBOX_SHOW_WAITING",
+        };
+        parse_bool_tristate(env::var(var).ok().as_deref())
+    }
 }
 
 fn set_row(toggles: &mut Toggles, row: Row, value: Option<bool>) {
     match row {
         Row::Tasks => toggles.show_tasks = value,
         Row::Subagents => toggles.show_subagents = value,
+        Row::Waiting => toggles.show_waiting = value,
     }
 }
 
@@ -454,25 +478,18 @@ fn current_state_value(toggles: &Toggles, row: Row) -> Option<bool> {
     match row {
         Row::Tasks => toggles.show_tasks,
         Row::Subagents => toggles.show_subagents,
+        Row::Waiting => toggles.show_waiting,
     }
 }
 
-fn effective_value(
-    toggles: &Toggles,
-    row: Row,
-    env_tasks: Option<bool>,
-    env_subs: Option<bool>,
-    density: Density,
-) -> bool {
-    let (state, env_var) = match row {
-        Row::Tasks => (toggles.show_tasks, env_tasks),
-        Row::Subagents => (toggles.show_subagents, env_subs),
-    };
+fn effective_value(toggles: &Toggles, row: Row, env_var: Option<bool>, density: Density) -> bool {
+    let state = current_state_value(toggles, row);
     let (override_val, _src) = resolve_row_visibility(state, env_var);
-    override_val.unwrap_or_else(|| match row {
-        Row::Tasks => density.includes_tasks(),
-        Row::Subagents => density.includes_subagents(),
-    })
+    match row {
+        Row::Tasks => override_val.unwrap_or_else(|| density.includes_tasks()),
+        Row::Subagents => override_val.unwrap_or_else(|| density.includes_subagents()),
+        Row::Waiting => waiting_row_enabled(state, env_var),
+    }
 }
 
 fn apply_set(
@@ -492,16 +509,12 @@ fn apply_set(
         eprintln!("{prefix}: failed to write state file: {e}");
         return ExitCode::from(1);
     }
-    let row_name = match row {
-        Row::Tasks => "tasks",
-        Row::Subagents => "subagents",
-    };
     let verb = match value {
         Some(true) => "shown",
         Some(false) => "hidden",
         None => "cleared",
     };
-    println!("ccbox: {row_name} row {verb}");
+    println!("ccbox: {} row {verb}", row.name());
     ExitCode::SUCCESS
 }
 
@@ -510,38 +523,30 @@ fn apply_flip(
     claude_dir: &Path,
     current: Toggles,
     row_arg: Option<&String>,
-    env_tasks: Option<bool>,
-    env_subs: Option<bool>,
     density: Density,
 ) -> ExitCode {
     let row = match parse_row(prefix, row_arg) {
         Ok(r) => r,
         Err(code) => return code,
     };
-    let effective = effective_value(&current, row, env_tasks, env_subs, density);
+    let effective = effective_value(&current, row, row.env_override(), density);
     apply_set(prefix, claude_dir, current, row_arg, Some(!effective))
 }
 
-fn print_status(
-    toggles: &Toggles,
-    env_tasks: Option<bool>,
-    env_subs: Option<bool>,
-    density: Density,
-) -> ExitCode {
+fn print_status(toggles: &Toggles, density: Density) -> ExitCode {
     println!("row         visible  source");
-    for (name, row, env_var) in [
-        ("tasks", Row::Tasks, env_tasks),
-        ("subagents", Row::Subagents, env_subs),
-    ] {
-        let state = current_state_value(toggles, row);
-        let (_override_val, source) = resolve_row_visibility(state, env_var);
-        let visible = effective_value(toggles, row, env_tasks, env_subs, density);
-        let src = match source {
-            RowVisibilitySource::StateFile => "state_file",
-            RowVisibilitySource::Env => "env",
-            RowVisibilitySource::Density => "density",
+    for row in Row::ALL {
+        let env_var = row.env_override();
+        let (_override_val, source) =
+            resolve_row_visibility(current_state_value(toggles, row), env_var);
+        let visible = effective_value(toggles, row, env_var, density);
+        let src = match (source, row) {
+            (RowVisibilitySource::StateFile, _) => "state_file",
+            (RowVisibilitySource::Env, _) => "env",
+            (RowVisibilitySource::Density, Row::Waiting) => "default",
+            (RowVisibilitySource::Density, _) => "density",
         };
-        println!("{name:<10}  {:<7}  {src}", visible.to_string());
+        println!("{:<10}  {:<7}  {src}", row.name(), visible.to_string());
     }
     ExitCode::SUCCESS
 }
@@ -579,6 +584,14 @@ mod toggle_tests {
             Ok(Row::Subagents) => {}
             _ => panic!("expected Row::Subagents"),
         }
+    }
+
+    #[test]
+    fn parse_row_accepts_waiting() {
+        assert!(matches!(
+            parse_row(VERB_PREFIX, Some(&"waiting".to_string())),
+            Ok(Row::Waiting)
+        ));
     }
 
     #[test]
@@ -625,7 +638,7 @@ mod toggle_tests {
         };
         toggles::save(dir.path(), &initial).unwrap();
         // density irrelevant here because state file wins.
-        let effective = effective_value(&initial, Row::Tasks, None, None, Density::Standard);
+        let effective = effective_value(&initial, Row::Tasks, None, Density::Standard);
         apply_set_for_test(dir.path(), Row::Tasks, Some(!effective));
         let t = toggles::load(dir.path());
         assert_eq!(t.show_tasks, Some(false));
@@ -636,7 +649,7 @@ mod toggle_tests {
         // No state file. CCBOX_SHOW_TASKS=true → effective=true → flip persists false.
         let dir = tempdir().unwrap();
         let current = toggles::load(dir.path());
-        let effective = effective_value(&current, Row::Tasks, Some(true), None, Density::Minimal);
+        let effective = effective_value(&current, Row::Tasks, Some(true), Density::Minimal);
         assert!(effective, "env should drive effective when no state");
         apply_set_for_test(dir.path(), Row::Tasks, Some(!effective));
         let t = toggles::load(dir.path());
@@ -648,11 +661,10 @@ mod toggle_tests {
         let dir = tempdir().unwrap();
         let current = toggles::load(dir.path());
         // Minimal density: includes_tasks() == false → effective=false → flip writes true.
-        let effective_minimal = effective_value(&current, Row::Tasks, None, None, Density::Minimal);
+        let effective_minimal = effective_value(&current, Row::Tasks, None, Density::Minimal);
         assert!(!effective_minimal);
         // Standard density: includes_tasks() == true → effective=true → flip writes false.
-        let effective_standard =
-            effective_value(&current, Row::Tasks, None, None, Density::Standard);
+        let effective_standard = effective_value(&current, Row::Tasks, None, Density::Standard);
         assert!(effective_standard);
     }
 
@@ -666,16 +678,29 @@ mod toggle_tests {
             &toggles,
             Row::Tasks,
             Some(true),
-            None,
             Density::Verbose
         ));
+    }
+
+    #[test]
+    fn waiting_is_off_at_every_density_until_turned_on() {
+        let none = Toggles::default();
+        for density in [Density::Minimal, Density::Standard, Density::Verbose] {
+            assert!(!effective_value(&none, Row::Waiting, None, density));
+            assert!(effective_value(&none, Row::Waiting, Some(true), density));
+        }
+        let on = Toggles {
+            show_waiting: Some(true),
+            ..Default::default()
+        };
+        assert!(effective_value(&on, Row::Waiting, None, Density::Minimal));
     }
 
     #[test]
     fn status_does_not_panic_with_no_inputs() {
         // The function returns an ExitCode and prints to stdout; just exercise it.
         let toggles = Toggles::default();
-        let code = print_status(&toggles, None, None, Density::Standard);
+        let code = print_status(&toggles, Density::Standard);
         let _ = code;
     }
 
@@ -684,6 +709,7 @@ mod toggle_tests {
         let mut toggles = Toggles {
             show_tasks: Some(true),
             show_subagents: Some(false),
+            ..Default::default()
         };
         set_row(&mut toggles, Row::Tasks, None);
         assert_eq!(toggles.show_tasks, None);
@@ -693,19 +719,19 @@ mod toggle_tests {
 
 fn print_toggle_help() {
     eprintln!(
-        "Usage: ccbox toggle <show|hide|flip> <tasks|subagents>\n       ccbox toggle status\n\
+        "Usage: ccbox toggle <show|hide|flip> <tasks|subagents|waiting>\n       ccbox toggle status\n\
          \n\
          Mutates <claude_dir>/ccbox-toggles.json. Takes effect on the next\n\
          statusline render; no Claude Code restart required.\n\
          \n\
-         Precedence: state file > CCBOX_SHOW_TASKS / CCBOX_SHOW_SUBAGENTS > CCBOX_DENSITY."
+         Precedence: state file > CCBOX_SHOW_<ROW> > CCBOX_DENSITY (waiting: off)."
     );
 }
 
 const USAGE: &str = "\
 Usage:
   ccbox [--theme NAME] [--width COLS] [--full-width] [--bg-shift warm|cool] [--snapshot]
-  ccbox show|hide|flip tasks|subagents
+  ccbox show|hide|flip tasks|subagents|waiting
   ccbox status
   ccbox update [--check] [--version X.Y.Z] [--force]
   ccbox version";
@@ -724,8 +750,8 @@ instead: the parsed session, resolved env, layout, per-component visibility and
 computed values, with no ANSI escapes. --version prints the installed version.
 
 Commands:
-  show|hide|flip ROW    Force the tasks or subagents row visible, hidden, or the
-                        opposite of what it is now. Writes
+  show|hide|flip ROW    Force the tasks, subagents or waiting row visible, hidden,
+                        or the opposite of what it is now. Writes
                         <claude_dir>/ccbox-toggles.json; the next render uses it
                         without a Claude Code restart.
   status                Each row's visibility and what decided it, then the
@@ -747,6 +773,8 @@ Environment variables:
                         by the state file (<claude_dir>/ccbox-toggles.json) when
                         present; unset = fall through to the density preset.
   CCBOX_SHOW_SUBAGENTS  Same shape as CCBOX_SHOW_TASKS, for the subagents row.
+  CCBOX_SHOW_WAITING    1/true/yes/on shows the row listing sessions that are
+                        waiting on you; unset = off. The state file overrides it.
   CCBOX_DENSITY         minimal | standard (default) | verbose: which
                         event-driven rows participate. minimal = ctx +
                         tokens/cost only; standard = + tasks/subagents/openspec
@@ -756,7 +784,7 @@ Environment variables:
                         ~100 columns) or as a single inline kanban.
   CCBOX_GIT_CACHE_TTL_MS
                         TTL in milliseconds for the on-disk GitInfo cache under
-                        <claude_dir>/ccbox-cache/git/ (default 2000; 0 disables
+                        <claude_dir>/ccbox-cache/git/ (default 10000; 0 disables
                         caching).
   CCBOX_UPDATE_CHECK    0/false/no/off turns off the daily background check for
                         a new release and the notice on the bottom border;
@@ -770,8 +798,8 @@ Environment variables:
   VIRTUAL_ENV           Path to the active Python venv; basename is shown when
                         VIRTUAL_ENV_PROMPT is unset.
 
-Visibility precedence (for tasks/subagents rows):
-  <claude_dir>/ccbox-toggles.json  >  CCBOX_SHOW_TASKS / CCBOX_SHOW_SUBAGENTS  >  CCBOX_DENSITY"#;
+Visibility precedence (for tasks/subagents/waiting rows):
+  <claude_dir>/ccbox-toggles.json  >  CCBOX_SHOW_<ROW>  >  CCBOX_DENSITY (waiting: off)"#;
 
 #[cfg(test)]
 mod help_tests {

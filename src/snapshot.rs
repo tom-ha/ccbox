@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 
 use crate::ansi::strip_ansi;
 use crate::components::{compose, ComponentContext, Composition, RenderCache};
-use crate::config::{resolve_row_visibility, Density, Env, RowVisibilitySource, TasksView};
+use crate::config::{
+    resolve_row_visibility, waiting_row_enabled, Density, Env, RowVisibilitySource, TasksView,
+};
 use crate::consts::{MEDIUM_WIDTH, MIN_WIDTH, NARROW_WIDTH};
 use crate::input::session::SessionInfo;
 use crate::layout::{fill_ratio, RowKind};
@@ -103,9 +105,11 @@ fn env_json(env: &Env) -> Value {
         "show_cost_override": env.show_cost_override,
         "show_tasks_override": env.show_tasks_override,
         "show_subagents_override": env.show_subagents_override,
+        "show_waiting_override": env.show_waiting_override,
         "toggles": {
             "show_tasks": env.toggles.show_tasks,
             "show_subagents": env.toggles.show_subagents,
+            "show_waiting": env.toggles.show_waiting,
         },
         "row_visibility": row_visibility_json(env),
         "venv": env.venv,
@@ -128,9 +132,17 @@ fn row_visibility_json(env: &Env) -> Value {
     let (sub_override, sub_src) =
         resolve_row_visibility(env.toggles.show_subagents, env.show_subagents_override);
     let sub_visible = sub_override.unwrap_or_else(|| env.density.includes_subagents());
+    let (_, waiting_src) =
+        resolve_row_visibility(env.toggles.show_waiting, env.show_waiting_override);
+    let waiting_visible = waiting_row_enabled(env.toggles.show_waiting, env.show_waiting_override);
+    let waiting_src = match waiting_src {
+        RowVisibilitySource::Density => "default",
+        s => source_str(s),
+    };
     json!({
-        "tasks":     { "visible": tasks_visible, "source": source_str(tasks_src) },
-        "subagents": { "visible": sub_visible,   "source": source_str(sub_src)  },
+        "tasks":     { "visible": tasks_visible,   "source": source_str(tasks_src) },
+        "subagents": { "visible": sub_visible,     "source": source_str(sub_src)  },
+        "waiting":   { "visible": waiting_visible, "source": waiting_src },
     })
 }
 
