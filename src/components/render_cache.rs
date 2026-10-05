@@ -16,7 +16,7 @@ use crate::cost::{
 use crate::data::git_info::GitInfo;
 use crate::data::loaded_skills::LoadedSkills;
 use crate::data::openspec::OpenSpec;
-use crate::data::running_subagents::RunningSubagents;
+use crate::data::running_subagents::{notified_task_ids, RunningSubagents};
 use crate::data::account_usage::{self, AccountUsage};
 use crate::data::waiting::{self, Marker};
 use crate::data::{session_name, subscription_marker};
@@ -119,6 +119,7 @@ impl RenderCache {
                 &ctx.session.workspace.project_dir,
                 ctx.now,
                 anchor,
+                &notified_task_ids(self.transcript(ctx)),
             )
         })
     }

@@ -1,6 +1,6 @@
 //! `RunningSubagents::from_session` — discover live subagent transcripts.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -10,6 +10,7 @@ use std::time::UNIX_EPOCH;
 use serde_json::Value;
 
 use crate::data::iso::parse_iso_to_epoch;
+use crate::data::transcript::{lines_containing, lines_containing_rev};
 
 #[derive(Debug, Clone)]
 pub enum SubagentActivity {
@@ -91,6 +92,63 @@ pub fn record_hook(claude_dir: &Path, event: &str, session_id: &str, agent_id: &
     }
 }
 
+/// Latest notification time per task id; an agent continued after finishing is
+/// notified again. Claude Code writes a notification as a user line, or as a
+/// queued-command attachment when it arrives mid-turn.
+pub fn notified_task_ids(transcript: &[u8]) -> HashMap<String, f64> {
+    let mut latest: HashMap<String, f64> = HashMap::new();
+    for ln in lines_containing(transcript, b"<task-id>") {
+        let Ok(v) = serde_json::from_str::<Value>(ln) else {
+            continue;
+        };
+        let text = match v.get("type").and_then(|x| x.as_str()) {
+            Some("user")
+                if v.pointer("/origin/kind") == Some(&Value::from("task-notification")) =>
+            {
+                v.pointer("/message/content")
+            }
+            Some("attachment")
+                if v.pointer("/attachment/commandMode")
+                    == Some(&Value::from("task-notification")) =>
+            {
+                v.pointer("/attachment/prompt")
+            }
+            _ => None,
+        };
+        let (Some(text), Some(ts)) = (
+            text.and_then(|x| x.as_str()),
+            v.get("timestamp")
+                .and_then(|x| x.as_str())
+                .map(parse_iso_to_epoch),
+        ) else {
+            continue;
+        };
+        let mut rest = text;
+        while let Some(start) = rest.find("<task-id>") {
+            rest = &rest[start + "<task-id>".len()..];
+            let Some(end) = rest.find("</task-id>") else {
+                break;
+            };
+            let at = latest.entry(rest[..end].trim().to_string()).or_insert(ts);
+            *at = at.max(ts);
+            rest = &rest[end..];
+        }
+    }
+    latest
+}
+
+fn last_timestamp(path: &Path) -> f64 {
+    let buf = fs::read(path).unwrap_or_default();
+    let last = lines_containing_rev(&buf, b"\"timestamp\"")
+        .filter_map(|ln| serde_json::from_str::<Value>(ln).ok())
+        .find_map(|v| {
+            v.get("timestamp")
+                .and_then(|t| t.as_str())
+                .map(parse_iso_to_epoch)
+        });
+    last.unwrap_or(0.0)
+}
+
 fn project_slug(project_dir: &str) -> String {
     project_dir
         .chars()
@@ -99,20 +157,16 @@ fn project_slug(project_dir: &str) -> String {
 }
 
 impl RunningSubagents {
-    /// Load subagent transcripts for the current session.
-    ///
-    /// `last_prompt_ts` is the Unix epoch second of the most recent real
-    /// user prompt (see [`crate::data::user_messages::last_user_prompt_ts`]).
-    /// When `> 0.0`, an agent is retained iff its `first_timestamp` is at
-    /// or after that boundary, unless its completion hook has fired. When
-    /// `0.0` (no anchor available), falls back to the `STALE_SECONDS` mtime
-    /// window.
+    /// Agents started since `last_prompt_ts` (or within `STALE_SECONDS` when it is
+    /// `0.0`) that have not finished: no completion-hook marker, and no entry in
+    /// `notified` at or after their last transcript line.
     pub fn from_session(
         claude_dir: &Path,
         session_id: &str,
         project_dir: &str,
         now: f64,
         last_prompt_ts: f64,
+        notified: &HashMap<String, f64>,
     ) -> Self {
         if session_id.is_empty() || project_dir.is_empty() {
             return Self::default();
@@ -169,7 +223,12 @@ impl RunningSubagents {
             let finished = [Some(agent_name), agent_name.strip_prefix("agent-")]
                 .into_iter()
                 .flatten()
-                .any(|id| finished_marker(claude_dir, session_id, id).is_some_and(|p| p.exists()));
+                .any(|id| {
+                    finished_marker(claude_dir, session_id, id).is_some_and(|p| p.exists())
+                        || notified
+                            .get(id)
+                            .is_some_and(|&at| at >= last_timestamp(&jsonl))
+                });
             if finished {
                 continue;
             }
@@ -314,19 +373,30 @@ mod tests {
     #[test]
     fn missing_subagents_dir_yields_empty() {
         let dir = tempdir().unwrap();
-        let r = RunningSubagents::from_session(dir.path(), "session", "/p", 1000.0, 0.0);
+        let r = RunningSubagents::from_session(
+            dir.path(),
+            "session",
+            "/p",
+            1000.0,
+            0.0,
+            &HashMap::new(),
+        );
         assert!(r.agents.is_empty());
     }
 
     #[test]
     fn empty_session_or_project_yields_empty() {
         let dir = tempdir().unwrap();
-        assert!(RunningSubagents::from_session(dir.path(), "", "/p", 0.0, 0.0)
-            .agents
-            .is_empty());
-        assert!(RunningSubagents::from_session(dir.path(), "s", "", 0.0, 0.0)
-            .agents
-            .is_empty());
+        assert!(
+            RunningSubagents::from_session(dir.path(), "", "/p", 0.0, 0.0, &HashMap::new())
+                .agents
+                .is_empty()
+        );
+        assert!(
+            RunningSubagents::from_session(dir.path(), "s", "", 0.0, 0.0, &HashMap::new())
+                .agents
+                .is_empty()
+        );
     }
 
     #[test]
@@ -363,7 +433,7 @@ mod tests {
             .unwrap()
             .as_secs_f64()
             + (STALE_SECONDS + 1000.0);
-        let r = RunningSubagents::from_session(dir.path(), "s", "/p", now, 0.0);
+        let r = RunningSubagents::from_session(dir.path(), "s", "/p", now, 0.0, &HashMap::new());
         assert!(r.agents.is_empty());
     }
 
@@ -400,7 +470,7 @@ mod tests {
             .unwrap()
             .as_secs_f64()
             + 5.0;
-        let r = RunningSubagents::from_session(dir.path(), "s", "/p", now, 0.0);
+        let r = RunningSubagents::from_session(dir.path(), "s", "/p", now, 0.0, &HashMap::new());
         assert_eq!(r.agents.len(), 1);
         assert_eq!(r.agents[0].agent_type, "Explore");
         assert_eq!(r.agents[0].description, "look around");
@@ -456,7 +526,14 @@ mod tests {
         // would have rejected both files — proving the anchor path is what
         // retains the new agent.
         let now = last_prompt_ts + 100_000.0;
-        let r = RunningSubagents::from_session(dir.path(), "s", "/p", now, last_prompt_ts);
+        let r = RunningSubagents::from_session(
+            dir.path(),
+            "s",
+            "/p",
+            now,
+            last_prompt_ts,
+            &HashMap::new(),
+        );
         assert_eq!(r.agents.len(), 1, "got: {:?}", r.agents);
         assert_eq!(r.agents[0].agent_type, "Plan");
     }
@@ -484,7 +561,16 @@ mod tests {
             .unwrap();
         }
         let prompt = parse_iso_to_epoch("2026-05-27T07:15:00.000Z");
-        let load = || RunningSubagents::from_session(dir.path(), "s", "/p", prompt + 60.0, prompt);
+        let load = || {
+            RunningSubagents::from_session(
+                dir.path(),
+                "s",
+                "/p",
+                prompt + 60.0,
+                prompt,
+                &HashMap::new(),
+            )
+        };
         assert_eq!(load().agents.len(), 3);
         record_hook(dir.path(), "SubagentStop", "s", "finished");
         record_hook(dir.path(), "SubagentStop", "s", "agent-raw");
@@ -495,5 +581,74 @@ mod tests {
         record_hook(dir.path(), "SubagentStop", "s", "finished");
         record_hook(dir.path(), "SessionEnd", "s", "");
         assert_eq!(load().agents.len(), 3);
+    }
+
+    #[test]
+    fn notified_task_ids_reads_only_notifications() {
+        let transcript = [
+            r#"{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"},"origin":{"kind":"task-notification"},"timestamp":"2026-05-27T08:00:00.000Z"}"#,
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>a2</task-id>\n</task-notification>","commandMode":"task-notification"},"timestamp":"2026-05-27T08:01:00.000Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"},"origin":{"kind":"task-notification"},"timestamp":"2026-05-27T09:00:00.000Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"<task-id>a3</task-id>"}]},"timestamp":"2026-05-27T09:01:00.000Z"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"<task-id>a4</task-id>"}]},"timestamp":"2026-05-27T09:02:00.000Z"}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            notified_task_ids(transcript.as_bytes()),
+            HashMap::from([
+                (
+                    "a1".to_string(),
+                    parse_iso_to_epoch("2026-05-27T09:00:00.000Z")
+                ),
+                (
+                    "a2".to_string(),
+                    parse_iso_to_epoch("2026-05-27T08:01:00.000Z")
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn notified_agent_is_finished_until_it_writes_again() {
+        let dir = tempdir().unwrap();
+        let subagents = dir
+            .path()
+            .join("projects")
+            .join(project_slug("/p"))
+            .join("s")
+            .join("subagents");
+        fs::create_dir_all(&subagents).unwrap();
+        for (id, start) in [("a1", "07:30"), ("a2", "07:31")] {
+            fs::write(
+                subagents.join(format!("agent-{id}.meta.json")),
+                format!(r#"{{"agentType":"Explore","description":"{id}"}}"#),
+            )
+            .unwrap();
+            fs::write(
+                subagents.join(format!("agent-{id}.jsonl")),
+                format!("{{\"timestamp\":\"2026-05-27T{start}:00.000Z\"}}\n"),
+            )
+            .unwrap();
+        }
+        let prompt = parse_iso_to_epoch("2026-05-27T07:15:00.000Z");
+        let notified = HashMap::from([(
+            "a1".to_string(),
+            parse_iso_to_epoch("2026-05-27T07:40:00.000Z"),
+        )]);
+        let running = || {
+            RunningSubagents::from_session(dir.path(), "s", "/p", prompt + 60.0, prompt, &notified)
+                .agents
+                .into_iter()
+                .map(|a| a.description)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(running(), ["a2"]);
+
+        let mut continued = fs::OpenOptions::new()
+            .append(true)
+            .open(subagents.join("agent-a1.jsonl"))
+            .unwrap();
+        writeln!(continued, "{{\"timestamp\":\"2026-05-27T07:50:00.000Z\"}}").unwrap();
+        assert_eq!(running(), ["a1", "a2"]);
     }
 }
