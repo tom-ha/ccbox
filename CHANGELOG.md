@@ -10,8 +10,9 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
 ### Fixed
 
 - Running subagents stay on the statusline when another background agent
-  finishes or an agent-team teammate sends a message. ccbox had taken those
-  notifications for a new prompt and hidden every agent started before them.
+  finishes, an agent-team teammate sends a message, or the conversation is
+  compacted. ccbox had taken each of these for a new prompt and hidden every
+  agent started before it.
 
 ## [0.7.1] - 2026-09-29
 
