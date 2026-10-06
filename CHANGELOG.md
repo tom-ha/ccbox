@@ -13,6 +13,8 @@ plugin and the marketplace entry; `scripts/release.sh` bumps them together.
   finishes, an agent-team teammate sends a message, or the conversation is
   compacted. ccbox had taken each of these for a new prompt and hidden every
   agent started before it.
+- In a resumed session, agents that finished before the resume no longer show
+  as running until the next prompt.
 
 ## [0.7.1] - 2026-09-29
 
