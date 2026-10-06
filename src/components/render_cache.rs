@@ -119,6 +119,7 @@ impl RenderCache {
                 &ctx.session.workspace.project_dir,
                 ctx.now,
                 anchor,
+                self.transcript(ctx),
             )
         })
     }

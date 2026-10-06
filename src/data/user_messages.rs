@@ -1,16 +1,3 @@
-//! `last_user_prompt_ts` — Unix epoch seconds of the most recent real user
-//! prompt in a Claude Code transcript.
-//!
-//! The Claude Code transcript stores three kinds of lines with `type:"user"`:
-//! 1. A real user prompt — `message.content` is a string.
-//! 2. A tool result returned to the model — `message.content` is an array of
-//!    `{"type":"tool_result", ...}` items.
-//! 3. System / meta entries (e.g. `/clear`) carrying `isMeta:true` or a
-//!    `command-name` content.
-//!
-//! Only the first kind anchors a prompt boundary. The other two ride inside
-//! an ongoing prompt-response cycle and should not advance the boundary.
-
 use serde_json::Value;
 
 use crate::data::iso::parse_iso_to_epoch;
@@ -35,11 +22,23 @@ pub fn last_user_prompt_ts_in(buf: &[u8]) -> f64 {
         if v.get("type").and_then(|x| x.as_str()) != Some("user") {
             continue;
         }
-        if v.get("isMeta").and_then(|x| x.as_bool()) == Some(true) {
+        if v.get("isMeta").and_then(|x| x.as_bool()) == Some(true)
+            || v.get("isCompactSummary").and_then(|x| x.as_bool()) == Some(true)
+        {
+            continue;
+        }
+        // A finished background agent's notification is a string-content user
+        // line too; moving the boundary to it would hide its running siblings.
+        let origin = v
+            .get("origin")
+            .and_then(|o| o.get("kind"))
+            .and_then(|x| x.as_str());
+        if origin.is_some_and(|kind| kind != "human") {
             continue;
         }
         let is_real_prompt = match v.get("message").and_then(|m| m.get("content")) {
-            Some(Value::String(_)) => true,
+            // Agent-team messages carry no `origin`; the envelope is the only marker.
+            Some(Value::String(s)) => origin.is_some() || !s.contains("<teammate-message"),
             Some(Value::Array(arr)) => !arr
                 .iter()
                 .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_result")),
@@ -131,6 +130,58 @@ mod tests {
         let ts = last_user_prompt_ts(p.to_str().unwrap());
         let expected = parse_iso_to_epoch("2026-05-27T07:00:00.000Z");
         assert!((ts - expected).abs() < 0.001);
+    }
+
+    fn anchor_of(lines: &[&str]) -> f64 {
+        last_user_prompt_ts_in(lines.join("\n").as_bytes())
+    }
+
+    const PROMPT_AT_7: &str = r#"{"type":"user","message":{"role":"user","content":"real"},"origin":{"kind":"human"},"promptSource":"typed","timestamp":"2026-05-27T07:00:00.000Z"}"#;
+
+    #[test]
+    fn ignores_task_notifications() {
+        let ts = anchor_of(&[
+            PROMPT_AT_7,
+            r#"{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"},"origin":{"kind":"task-notification","producer":"session-task"},"promptSource":"system","timestamp":"2026-05-27T08:00:00.000Z"}"#,
+        ]);
+        assert_eq!(ts, parse_iso_to_epoch("2026-05-27T07:00:00.000Z"));
+    }
+
+    #[test]
+    fn ignores_every_origin_but_human() {
+        let ts = anchor_of(&[
+            PROMPT_AT_7,
+            r#"{"type":"user","message":{"role":"user","content":"2 background agents were stopped by the user."},"origin":{"kind":"task-notification"},"promptSource":"system","timestamp":"2026-05-27T08:00:00.000Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"hello"},"origin":{"kind":"peer"},"timestamp":"2026-05-27T09:00:00.000Z"}"#,
+        ]);
+        assert_eq!(ts, parse_iso_to_epoch("2026-05-27T07:00:00.000Z"));
+    }
+
+    #[test]
+    fn ignores_teammate_messages() {
+        let ts = anchor_of(&[
+            r#"{"type":"user","message":{"role":"user","content":"real"},"timestamp":"2026-05-27T07:00:00.000Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"Another Claude session sent a message:\n<teammate-message teammate_id=\"t\">done</teammate-message>"},"timestamp":"2026-05-27T08:00:00.000Z"}"#,
+        ]);
+        assert_eq!(ts, parse_iso_to_epoch("2026-05-27T07:00:00.000Z"));
+    }
+
+    #[test]
+    fn human_prompt_quoting_a_teammate_message_still_anchors() {
+        let ts = anchor_of(&[
+            PROMPT_AT_7,
+            r#"{"type":"user","message":{"role":"user","content":"why does <teammate-message> hide agents?"},"origin":{"kind":"human"},"promptSource":"typed","timestamp":"2026-05-27T08:00:00.000Z"}"#,
+        ]);
+        assert_eq!(ts, parse_iso_to_epoch("2026-05-27T08:00:00.000Z"));
+    }
+
+    #[test]
+    fn ignores_compact_summaries() {
+        let ts = anchor_of(&[
+            PROMPT_AT_7,
+            r#"{"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation."},"isCompactSummary":true,"isVisibleInTranscriptOnly":true,"timestamp":"2026-05-27T08:00:00.000Z"}"#,
+        ]);
+        assert_eq!(ts, parse_iso_to_epoch("2026-05-27T07:00:00.000Z"));
     }
 
     #[test]
